@@ -1,0 +1,483 @@
+commit 56882dc5ea1710a0bed4046d01edac89bef423a1
+Author: Wangpan <hzwangpan@corp.netease.com>
+Date:   Thu May 16 17:59:56 2013 +0800
+
+    add nbs volume attachment process
+    
+    Change-Id: Ia9f003f498a3748028ce89879d6eaf5685bcad94
+
+diff --git a/nova/api/openstack/compute/contrib/server_status.py b/nova/api/openstack/compute/contrib/server_status.py
+index d9368a4..175230e 100644
+--- a/nova/api/openstack/compute/contrib/server_status.py
++++ b/nova/api/openstack/compute/contrib/server_status.py
+@@ -14,19 +14,14 @@
+ #    License for the specific language governing permissions and limitations
+ #    under the License
+ 
+-import datetime
+-
+-import memcache
+ from webob import exc
+ 
+ from nova.api.openstack import extensions
+-from nova import db
++from nova import compute
+ from nova import exception
+ from nova import flags
+ from nova.openstack.common import cfg
+ from nova.openstack.common import log as logging
+-from nova.openstack.common import timeutils
+-from nova import utils
+ 
+ 
+ metadata_opts = [
+@@ -39,64 +34,27 @@ FLAGS = flags.FLAGS
+ FLAGS.register_opts(metadata_opts)
+ LOG = logging.getLogger(__name__)
+ authorize = extensions.extension_authorizer('compute', 'server_status')
+-MEMCACHE_CLIENT_API = None
+ 
+ 
+ class ServerStatusController(object):
++    def __init__(self):
++        self.compute_api = compute.API()
+ 
+     def show(self, req, id):
++        context = req.environ['nova.context']
++        authorize(context)
++        LOG.debug(_("Listing server status"), context=context,
++                    instance_uuid=id)
++
+         try:
+-            context = req.environ['nova.context']
+-            authorize(context)
+-            LOG.debug(_("Listing server status"))
+-            result = self._instance_os_boot_ready(
+-                            context, id,
+-                            FLAGS.server_heartbeat_period)
++            instance = self.compute_api.get(context, id)
++            result = self.compute_api.instance_os_boot_ready(context,
++                                            instance['uuid'],
++                                            FLAGS.server_heartbeat_period)
+             return result
+         except exception.NotFound:
+             raise exc.HTTPNotFound()
+ 
+-    def _instance_os_boot_ready(self, context, instance_uuid,
+-                                heartbeat_period):
+-        #NOTE(hzyangtk): determine VM is active or not by VM heartbeat
+-        status = 'down'
+-        interval = heartbeat_period * 1.5
+-        try:
+-            db.instance_get_by_uuid(context, instance_uuid)
+-        except exception.InstanceNotFound:
+-            raise exception.NotFound()
+-
+-        cache_key = str(instance_uuid + '_heart')
+-        memcache_client = self._get_memcache_client()
+-        if memcache_client is not None:
+-            cache_value = memcache_client.get(cache_key)
+-            if cache_value:
+-                last_heartbeat = datetime.datetime.strptime(
+-                                        cache_value,
+-                                        '%Y-%m-%d %H:%M:%S')
+-                # Timestamps in DB are UTC.
+-                elapsed = utils.total_seconds(
+-                                timeutils.utcnow() - last_heartbeat)
+-                if abs(elapsed) <= interval:
+-                    status = 'up'
+-        else:
+-            msg = _('Store data can not catch')
+-            raise exc.HTTPServerError(explanation=msg)
+-
+-        return {'instance_uuid': instance_uuid,
+-                'status': status}
+-
+-    def _get_memcache_client(self):
+-        """Return memcache client"""
+-        global MEMCACHE_CLIENT_API
+-        if MEMCACHE_CLIENT_API is not None:
+-            return MEMCACHE_CLIENT_API
+-        else:
+-            if FLAGS.memcached_servers:
+-                MEMCACHE_CLIENT_API = memcache.Client(FLAGS.memcached_servers,
+-                                                      debug=0)
+-            return MEMCACHE_CLIENT_API
+-
+ 
+ class Server_status(extensions.ExtensionDescriptor):
+     """Add server_status to the Create Server v1.1 API"""
+diff --git a/nova/api/openstack/compute/contrib/volumes.py b/nova/api/openstack/compute/contrib/volumes.py
+index 9940e30..c10c8e6 100644
+--- a/nova/api/openstack/compute/contrib/volumes.py
++++ b/nova/api/openstack/compute/contrib/volumes.py
+@@ -15,6 +15,7 @@
+ 
+ """The volumes extension."""
+ 
++import time
+ import webob
+ from webob import exc
+ from xml.dom import minidom
+@@ -375,9 +376,64 @@ class VolumeAttachmentController(wsgi.Controller):
+             instance['uuid'],
+             assigned_mountpoint)}
+ 
++    def _attach_nbs_volume(self, req, server_id, body):
++        """   """
++        context = req.environ['nova.context']
++        authorize(context)
++
++        if not self.is_valid_body(body, 'volumeAttachment'):
++            raise exc.HTTPUnprocessableEntity()
++
++        volume_id = body['volumeAttachment']['volumeId']
++
++        msg = _("Attach nbs volume %s to instance %s") % (volume_id, server_id)
++        LOG.audit(msg, context=context)
++
++        try:
++            instance = self.compute_api.get(context, server_id)
++            # Check os status if instance is 'ACTIVE'
++            if instance['status'] == "ACTIVE":
++                server_heartbeat_period = FLAGS.get('server_heartbeat_period',
++                                                    10)
++                os_status = self.compute_api.instance_os_boot_ready(context,
++                                                    instance['uuid'],
++                                                    server_heartbeat_period)
++                if os_status['status'] != "up":
++                    explanation = _("Can't attach volume while instance os "
++                                    "is starting.")
++                    raise exc.HTTPForbidden(explanation=explanation)
++            device = self.compute_api.attach_nbs_volume(context, instance,
++                                                        volume_id)
++        except exception.NotFound:
++            raise exc.HTTPNotFound()
++
++        # The attach is async
++        attachment = {}
++        attachment['requestId'] = context.request_id
++        attachment['instanceId'] = instance['uuid']
++        attachment['volumeId'] = volume_id
++        attachment['device'] = device
++        attachment['status'] = 0
++        attachment['attachTime'] = long(time.time())
++
++        # NOTE(justinsb): And now, we have a problem...
++        # The attach is async, so there's a window in which we don't see
++        # the attachment (until the attachment completes).  We could also
++        # get problems with concurrent requests.  I think we need an
++        # attachment state, and to write to the DB here, but that's a bigger
++        # change.
++        # For now, we'll probably have to rely on libraries being smart
++
++        # TODO(justinsb): How do I return "accepted" here?
++        return {'attachment': attachment}
++
+     @wsgi.serializers(xml=VolumeAttachmentTemplate)
+     def create(self, req, server_id, body):
+         """Attach a volume to an instance."""
++        # Go to our owned process if we are attaching a nbs volume
++        if FLAGS.ebs_backend == 'nbs':
++            return self._attach_nbs_volume(req, server_id, body)
++
+         context = req.environ['nova.context']
+         authorize(context)
+ 
+diff --git a/nova/compute/api.py b/nova/compute/api.py
+index bd417fe..df652f3 100644
+--- a/nova/compute/api.py
++++ b/nova/compute/api.py
+@@ -22,12 +22,15 @@
+ networking and storage of VMs, and compute hosts on which they run)."""
+ 
+ import base64
++import datetime
+ import functools
+ import re
+ import string
+ import time
+ import urllib
+ 
++import memcache
++
+ from nova import block_device
+ from nova.compute import instance_types
+ from nova.compute import power_state
+@@ -63,6 +66,7 @@ flags.DECLARE('consoleauth_topic', 'nova.consoleauth')
+ 
+ MAX_USERDATA_SIZE = 65535
+ QUOTAS = quota.QUOTAS
++MEMCACHE_CLIENT_API = None
+ 
+ 
+ def check_instance_state(vm_state=None, task_state=(None,)):
+@@ -2104,6 +2108,63 @@ class API(base.Base):
+         """Inject network info for the instance."""
+         self.compute_rpcapi.inject_network_info(context, instance=instance)
+ 
++    def _get_memcache_client(self):
++        """Return memcache client"""
++        global MEMCACHE_CLIENT_API
++        if MEMCACHE_CLIENT_API is not None:
++            return MEMCACHE_CLIENT_API
++        else:
++            if FLAGS.memcached_servers:
++                MEMCACHE_CLIENT_API = memcache.Client(FLAGS.memcached_servers,
++                                                      debug=0)
++            return MEMCACHE_CLIENT_API
++
++    def instance_os_boot_ready(self, context, instance_uuid, heartbeat_period):
++        #NOTE(hzyangtk): determine VM is active or not by VM heartbeat
++        status = 'down'
++        interval = heartbeat_period * 1.5
++
++        cache_key = str(instance_uuid + '_heart')
++        memcache_client = self._get_memcache_client()
++        if memcache_client is not None:
++            cache_value = memcache_client.get(cache_key)
++            if cache_value:
++                last_heartbeat = datetime.datetime.strptime(
++                                        cache_value,
++                                        '%Y-%m-%d %H:%M:%S')
++                # Timestamps in DB are UTC.
++                elapsed = utils.total_seconds(
++                                timeutils.utcnow() - last_heartbeat)
++                if abs(elapsed) <= interval:
++                    status = 'up'
++        else:
++            msg = _('Store data can not catch')
++            raise exc.HTTPServerError(explanation=msg)
++
++        return {'instance_uuid': instance_uuid,
++                'status': status}
++
++    @wrap_check_policy
++    @check_instance_lock
++    def attach_nbs_volume(self, context, instance, volume_id):
++        """Attach an existing volume to an existing instance."""
++        # NOTE(vish): This is done on the compute host because we want
++        #             to avoid a race where two devices are requested at
++        #             the same time. When db access is removed from
++        #             compute, the bdm will be created here and we will
++        #             have to make sure that they are assigned atomically.
++        device = self.compute_rpcapi.get_device_for_nbs_volume(
++                        context, instance=instance)
++        try:
++            self.compute_rpcapi.attach_nbs_volume(context, instance=instance,
++                    volume_id=volume_id, mountpoint=device)
++        except Exception:
++            with excutils.save_and_reraise_exception():
++                self.db.block_device_mapping_destroy_by_instance_and_device(
++                        context, instance['uuid'], device)
++
++        return device
++
+     @wrap_check_policy
+     @check_instance_lock
+     def attach_volume(self, context, instance, volume_id, device=None):
+diff --git a/nova/compute/manager.py b/nova/compute/manager.py
+index e863e73..8575ce7 100644
+--- a/nova/compute/manager.py
++++ b/nova/compute/manager.py
+@@ -2878,6 +2878,22 @@ class ComputeManager(manager.SchedulerDependentManager):
+     @exception.wrap_exception(notifier=notifier, publisher_id=publisher_id())
+     @reverts_task_state
+     @wrap_instance_fault
++    def get_device_for_nbs_volume(self, context, instance):
++
++        @utils.synchronized(instance['uuid'])
++        def do_reserve():
++            result = compute_utils.get_device_for_nbs_volume(context, instance)
++
++            # NOTE(vish): create bdm here to avoid race condition
++            values = {'instance_uuid': instance['uuid'],
++                      'device_name': result}
++            self.db.block_device_mapping_create(context, values)
++            return result
++        return do_reserve()
++
++    @exception.wrap_exception(notifier=notifier, publisher_id=publisher_id())
++    @reverts_task_state
++    @wrap_instance_fault
+     def reserve_block_device_name(self, context, instance, device):
+ 
+         @utils.synchronized(instance['uuid'])
+@@ -2895,6 +2911,58 @@ class ComputeManager(manager.SchedulerDependentManager):
+     @exception.wrap_exception(notifier=notifier, publisher_id=publisher_id())
+     @reverts_task_state
+     @wrap_instance_fault
++    def attach_nbs_volume(self, context, volume_id, mountpoint, instance):
++        """Attach a nbs volume to an instance."""
++        try:
++            return self._attach_nbs_volume(context, volume_id,
++                                           mountpoint, instance)
++        except Exception:
++            with excutils.save_and_reraise_exception():
++                self.db.block_device_mapping_destroy_by_instance_and_device(
++                        context, instance.get('uuid'), mountpoint)
++
++    def _attach_nbs_volume(self, context, volume_id, mountpoint, instance):
++        context = context.elevated()
++        LOG.audit(_('Attaching nbs volume %(volume_id)s to %(mountpoint)s'),
++                  locals(), context=context, instance=instance)
++        try:
++            # call nbs to attach volume to host
++
++        except Exception:  # pylint: disable=W0702
++            with excutils.save_and_reraise_exception():
++                msg = _("Failed to connect to volume %(volume_id)s "
++                        "while attaching at %(mountpoint)s")
++                LOG.exception(msg % locals(), context=context,
++                              instance=instance)
++                # notify nbs attach failed
++
++        try:
++            self.driver.attach_nbs_volume(instance['name'], mountpoint)
++        except Exception:  # pylint: disable=W0702
++            with excutils.save_and_reraise_exception():
++                msg = _("Failed to attach volume %(volume_id)s "
++                        "at %(mountpoint)s")
++                LOG.exception(msg % locals(), context=context,
++                              instance=instance)
++                # notify nbs attach failed
++
++        # notify nbs attach successfully
++
++        values = {
++            'instance_uuid': instance['uuid'],
++            'connection_info': None,
++            'device_name': mountpoint,
++            'delete_on_termination': False,
++            'virtual_name': None,
++            'snapshot_id': None,
++            'volume_id': volume_id,
++            'volume_size': None,
++            'no_device': None}
++        self.db.block_device_mapping_update_or_create(context, values)
++
++    @exception.wrap_exception(notifier=notifier, publisher_id=publisher_id())
++    @reverts_task_state
++    @wrap_instance_fault
+     def attach_volume(self, context, volume_id, mountpoint, instance):
+         """Attach a volume to an instance."""
+         try:
+diff --git a/nova/compute/rpcapi.py b/nova/compute/rpcapi.py
+index 0cd2668..f7c4c0b 100644
+--- a/nova/compute/rpcapi.py
++++ b/nova/compute/rpcapi.py
+@@ -170,6 +170,13 @@ class ComputeAPI(nova.openstack.common.rpc.proxy.RpcProxy):
+                 instance=instance_p, network_id=network_id),
+                 topic=_compute_topic(self.topic, ctxt, None, instance))
+ 
++    def attach_nbs_volume(self, ctxt, instance, volume_id, mountpoint):
++        instance_p = jsonutils.to_primitive(instance)
++        self.cast(ctxt, self.make_msg('attach_nbs_volume',
++                instance=instance_p, volume_id=volume_id,
++                mountpoint=mountpoint),
++                topic=_compute_topic(self.topic, ctxt, None, instance))
++
+     def attach_volume(self, ctxt, instance, volume_id, mountpoint):
+         instance_p = jsonutils.to_primitive(instance)
+         self.cast(ctxt, self.make_msg('attach_volume',
+@@ -458,6 +465,12 @@ class ComputeAPI(nova.openstack.common.rpc.proxy.RpcProxy):
+         topic = _compute_topic(self.topic, ctxt, host, None)
+         return self.call(ctxt, self.make_msg('get_host_uptime'), topic)
+ 
++    def get_device_for_nbs_volume(self, ctxt, instance):
++        instance_p = jsonutils.to_primitive(instance)
++        return self.call(ctxt, self.make_msg('get_device_for_nbs_volume',
++                instance=instance_p),
++                topic=_compute_topic(self.topic, ctxt, None, instance))
++
+     def reserve_block_device_name(self, ctxt, instance, device):
+         instance_p = jsonutils.to_primitive(instance)
+         return self.call(ctxt, self.make_msg('reserve_block_device_name',
+diff --git a/nova/compute/utils.py b/nova/compute/utils.py
+index a8a0a65..ac51798 100644
+--- a/nova/compute/utils.py
++++ b/nova/compute/utils.py
+@@ -55,6 +55,8 @@ def add_instance_fault_from_exc(context, instance_uuid, fault, exc_info=None):
+     }
+     db.instance_fault_create(context, values)
+ 
++def get_device_for_nbs_volume(context, instance):
++    """ """
+ 
+ def get_device_name_for_instance(context, instance, device):
+     """Validates (or generates) a device name for instance.
+diff --git a/nova/flags.py b/nova/flags.py
+index c0112ce..88aca46 100644
+--- a/nova/flags.py
++++ b/nova/flags.py
+@@ -230,6 +230,31 @@ resize_opts = [
+ 
+ FLAGS.register_opts(resize_opts)
+ 
++nbs_opts = [
++    cfg.StrOpt('ebs_backend',
++                default='nbs',
++                help='the backend type of ebs service, may be nbs or cinder'),
++    cfg.StrOpt('nbs_api_server',
++                default=None,
++                help='the host and port of nbs server'),
++    cfg.StrOpt('nbs_prefix_url',
++                default='EBS',
++                help='the url prefix of nbs server, the final url should like '
++                 'this: nbs_api_server/nbs_prefix_url/?Action=XX&YY=ZZ...'),
++    cfg.StrOpt('host_ip_ifname',
++               default='br100',
++               help='network device to get intranet ip address for nbs'),
++    cfg.IntOpt('nbs_wait_timeout',
++               default='br100',
++               help='network device to get intranet ip address for nbs'),
++    cfg.StrOpt('nbs_mountpoint_prefix',
++               default='nbs',
++               help='mount point prefix of nbs disk displays in vm, may like '
++                    '/dev/nbs/xydz'),
++]
++
++FLAGS.register_opts(nbs_opts)
++
+ global_opts = [
+     cfg.StrOpt('my_ip',
+                default=_get_my_ip(),
+diff --git a/nova/virt/libvirt/driver.py b/nova/virt/libvirt/driver.py
+index 5bd7529..42a2c8a 100644
+--- a/nova/virt/libvirt/driver.py
++++ b/nova/virt/libvirt/driver.py
+@@ -735,6 +735,34 @@ class LibvirtDriver(driver.ComputeDriver):
+         return method(connection_info, *args, **kwargs)
+ 
+     @exception.wrap_exception()
++    def attach_nbs_volume(self, instance_name, mountpoint):
++        if FLAGS.libvirt_type == 'lxc':
++            LOG.error(_("LXC hypervisor is not supported to attach volume."))
++            raise
++
++        virt_dom = self._lookup_by_name(instance_name)
++        mount_device = mountpoint.rpartition("/")[2]
++
++        try:
++            virt_dom.attachDevice(conf.to_xml())
++        except Exception, ex:
++            if isinstance(ex, libvirt.libvirtError):
++                errcode = ex.get_error_code()
++                if errcode == libvirt.VIR_ERR_OPERATION_FAILED:
++                    LOG.error(_("attach volume failed"))
++                    raise exception.DeviceIsBusy(device=mount_device)
++
++            with excutils.save_and_reraise_exception():
++                LOG.error(_("attach volume failed"))
++
++        # TODO(danms) once libvirt has support for LXC hotplug,
++        # replace this re-define with use of the
++        # VIR_DOMAIN_AFFECT_LIVE & VIR_DOMAIN_AFFECT_CONFIG flags with
++        # attachDevice()
++        domxml = virt_dom.XMLDesc(libvirt.VIR_DOMAIN_XML_SECURE)
++        self._conn.defineXML(domxml)
++
++    @exception.wrap_exception()
+     def attach_volume(self, connection_info, instance_name, mountpoint):
+         virt_dom = self._lookup_by_name(instance_name)
+         mount_device = mountpoint.rpartition("/")[2]
