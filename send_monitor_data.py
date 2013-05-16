@@ -2,20 +2,23 @@
 
 '''
 Created on 2012-07-23
-Updated on 2013-03-28
+Updated on 2013-04-19
 
 @author: hzyangtk@corp.netease.com
 '''
 
+import fcntl
 import hashlib
 import hmac
 import httplib
 import json
 import os
-import subprocess
+import socket
+import struct
 import time
 import urllib
 from xml.etree import ElementTree
+
 
 PERIOD_TIME = 60
 MONITOR_PATH = '/etc/vm_monitor/'
@@ -38,6 +41,7 @@ TEMP_DATA = {
              'timestamp': 0
 }
 ENABLE_PARTITION_MONITOR = True
+NET_CARD_LIST = ['eth0', ]
 
 
 def get_ori_user():
@@ -97,7 +101,7 @@ def read_info_file():
         Read config info from local file, default path: /etc/vm_monitor/info
     '''
     with open(INFO_PATH, 'r') as info_file:
-        data_from_file = file_reader.read()
+        data_from_file = info_file.read()
     metadata_dict = json.loads(data_from_file)
     return metadata_dict
 
@@ -106,6 +110,14 @@ def read_info_file():
 #    Use temp file to store last minute data.
 #    default path: /etc/vm_monitor/temp
 #
+def check_temp_expired(temp_timestamp):
+    period = long(time.time()) - temp_timestamp
+    if period >= 0 and period <= PERIOD_TIME + 30:
+        return False
+    else:
+        return True
+
+
 def read_temp_file():
     '''
         When monitor start it will read temp file which has stored datas
@@ -123,8 +135,8 @@ def read_temp_file():
             temp_file_read.close()
             if tempdata:
                 temp_data = json.loads(tempdata)
-                period = long(time.time()) - temp_data['timestamp']
-                if period > 0 and period <= PERIOD_TIME + 30:
+                is_expired = check_temp_expired(temp_data['timestamp'])
+                if not is_expired:
                     for key in temp_data.keys():
                         if key in TEMP_DATA:
                             TEMP_DATA[key] = temp_data[key]
@@ -177,14 +189,33 @@ def notify_platform_partition_change(disk_partition_info):
                                      'logic':['vda1', 'vdb1', 'dm-0']}
     '''
     try:
-        send_request = SendRequest(
-                            metadata_dict=read_info_file(),
-                            request_uri='/rest/V1/nvs/updatePartitionInfo',
-                            system_partitions=disk_partition_info['sys'],
-                            logic_partitions=disk_partition_info['logic'])
-        send_request.send_request_to_server()
+        metadata_dict = read_info_file()
+        request_uri = '/rest/V1/nvs/updatePartitionInfo'
+        system_partitions = ','.join(disk_partition_info['sys'])
+        logic_partitions = ','.join(disk_partition_info['logic'])
+        # partition dimension is like openstack=1.1.1.1 or RDS=123456
+        parti_dimension = metadata_dict.get('service') + '=' \
+                            + get_ip_by_ifname(NET_CARD_LIST[0])
+        send_request = SendRequest(metadata_dict=metadata_dict,
+                                   request_uri=request_uri,
+                                   system_partitions=system_partitions,
+                                   logic_partitions=logic_partitions,
+                                   parti_dimension=parti_dimension)
+        response = send_request.send_request_to_server()
+        if response.status == 200:
+            return True
+        else:
+            return False
     except Exception:
-        pass
+        return False
+
+
+def get_ip_by_ifname(ifname):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    ip = socket.inet_ntoa(fcntl.ioctl(s.fileno(), 0x8915,  # SIOCGIFADDR
+                                      struct.pack('256s', ifname[:15])
+                                      )[20:24])
+    return ip
 
 
 class GetSystemUsage(object):
@@ -227,31 +258,41 @@ class GetSystemUsage(object):
             cpu_usage = 0.0
         return {'cpu_usage': cpu_usage}
 
+    def _get_loadavg_dict(self):
+        '''
+            Get loadavg info from /proc/loadavg.
+            @return: {'loadavg_5': 4.32}
+        '''
+        with open('/proc/loadavg', 'r') as loadavg_file_read:
+            loadavg_info_line = loadavg_file_read.readline()
+        loadavg_5 = float(loadavg_info_line.split()[1])
+
+        return {'loadavg_5': loadavg_5}
+
     def _get_memory_usage_dict(self):
         '''
-            Get memory info(KB) by free command.
+            Get memory info(MB) from /proc/meminfo.
             @return: {'total_memory': 1, 'free_memory': 1,
-                      'used_memory': 1}
+                      'used_memory': 1, 'memory_usage_rate': 45}
+            free_memory = MemFree + Buffers + Cached
+            used_memory = MemTotal - free_memory
+            memory_usage_rate = used_memory * 100 / MemTotal
         '''
-        mem_path = '/proc/meminfo'
-        if os.path.exists(mem_path):
-            mem_file_read = open(mem_path, 'r')
-            mem_total_line = mem_file_read.readline()
-            mem_free_line = mem_file_read.readline()
-            mem_file_read.close()
-            mem_total_num = mem_total_line.split()[1]
-            mem_free_num = mem_free_line.split()[1]
-            total_memory = long(mem_total_num) / 1024
-            free_memory = long(mem_free_num) / 1024
-            used_memory = (long(mem_total_num) - long(mem_free_num)) / 1024
-        else:
-            total_memory = 0
-            free_memory = 0
-            used_memory = 0
+        with open('/proc/meminfo', 'r') as mem_file_read:
+            mem_info_lines = mem_file_read.readlines()
+
+        total_memory = long(mem_info_lines[0].split()[1]) / 1024
+        free_memory = (long(mem_info_lines[1].split()[1])
+                       + long(mem_info_lines[2].split()[1])
+                       + long(mem_info_lines[3].split()[1])) / 1024
+        used_memory = total_memory - free_memory
+        memory_usage_rate = (used_memory * 100) / total_memory
+
         return {
             'total_memory': total_memory,
             'free_memory': free_memory,
-            'used_memory': used_memory
+            'used_memory': used_memory,
+            'memory_usage_rate': memory_usage_rate
         }
 
     def _get_disk_data(self):
@@ -301,9 +342,9 @@ class GetSystemUsage(object):
             total = hddinfo.f_frsize * hddinfo.f_blocks
             free = hddinfo.f_frsize * hddinfo.f_bavail
             used = hddinfo.f_frsize * (hddinfo.f_blocks - hddinfo.f_bfree)
-            return {'total': int(float(total)/1024/1024),
-                    'free': int(float(free)/1024/1024),
-                    'used': int(float(used)/1024/1024)}
+            return {'total': float(total) / 1024 / 1024,
+                    'free': float(free) / 1024 / 1024,
+                    'used': float(used) / 1024 / 1024}
 
         def _get_patition_info(disks, total_disk_info):
             partitions = {'sys': [], 'logic': []}
@@ -424,11 +465,15 @@ class GetSystemUsage(object):
         }
 
         # when partition info changed, notify platform with new partition info
+        last_partition_info = {}
+        is_success = True
         if ENABLE_PARTITION_MONITOR and \
                 now_disk_data.get('disk_partition_info') \
                 != TEMP_DATA.get('disk_partition_info'):
-            notify_platform_partition_change(
+            is_success = notify_platform_partition_change(
                             now_disk_data.get('disk_partition_info', []))
+            if not is_success:
+                last_partition_info = TEMP_DATA['disk_partition_info']
 
         for key in now_disk_data.keys():
             if key in TEMP_DATA:
@@ -436,8 +481,8 @@ class GetSystemUsage(object):
 
         # FIXME(hzyangtk): here add for don`t record partition info into temp.
         # To do this when partition monitor enable, partition change will occur
-        if not ENABLE_PARTITION_MONITOR:
-            TEMP_DATA['disk_partition_info'] = []
+        if not ENABLE_PARTITION_MONITOR or not is_success:
+            TEMP_DATA['disk_partition_info'] = last_partition_info
 
         return disk_usage_dict
 
@@ -448,26 +493,25 @@ class GetSystemUsage(object):
             Split the grep result and divide it into list.
             @return: ['10.120.0.1', '123', '123']
         '''
+        receive_bytes = 0L
+        transfer_bytes = 0L
+        receive_packages = 0L
+        transfer_packages = 0L
         # TODO(hzyangtk): When VM has multiple network card, it should monitor
         #                 all the cards but not only eth0.
-        # FIXME(hzyangtk): When ech0 switch to a bridge, this method cannot
-        #                  catch eth0 `s ip.
-        networkResult = subprocess.Popen(
-                        args='ifconfig eth0 | grep "inet addr" --color=none',
-                        shell=True, stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE).communicate()[0]
-
-        networkInfoResult = subprocess.Popen(
-                        args='ifconfig eth0 | grep "RX bytes" --color=none',
-                        shell=True, stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE).communicate()[0]
-
-        networkResults = networkResult.split()
-        vm_ip = networkResults[1].split(':')[1]
-        networkInfoResults = networkInfoResult.split()
-        receive_bytes = int(networkInfoResults[1].split(':')[1])
-        transfer_bytes = int(networkInfoResults[5].split(':')[1])
-        return [vm_ip, receive_bytes, transfer_bytes]
+        with open('/proc/net/dev', 'r') as net_dev:
+            network_lines = net_dev.readlines()
+        for network_line in network_lines:
+            network_datas = network_line.replace(':', ' ').split()
+            try:
+                if network_datas[0] in NET_CARD_LIST:
+                    receive_bytes += long(network_datas[1])
+                    receive_packages += long(network_datas[2])
+                    transfer_bytes += long(network_datas[9])
+                    transfer_packages += long(network_datas[10])
+            except Exception:
+                continue
+        return [receive_bytes, transfer_bytes]
 
     def _get_network_flow_rate_dict(self):
         '''
@@ -482,7 +526,7 @@ class GetSystemUsage(object):
         '''
         old_receive_bytes = TEMP_DATA['network_receive_bytes']
         old_transfer_bytes = TEMP_DATA['network_transfer_bytes']
-        vm_ip, now_receive_bytes, now_transfer_bytes = \
+        now_receive_bytes, now_transfer_bytes = \
                                     self._get_network_flow_data()
         receive_rate = float(now_receive_bytes - old_receive_bytes) \
                                             / 1024 / PERIOD_TIME
@@ -493,7 +537,6 @@ class GetSystemUsage(object):
             transfer_rate = 0
 
         network_info_dict = {
-                'ip': vm_ip,
                 'receive_rate': receive_rate,
                 'transfer_rate': transfer_rate
         }
@@ -507,13 +550,13 @@ class GetSystemUsage(object):
             The key names of all_system_usage_dict are the same as XML setting.
         '''
         cpu_usage = self._get_cpu_usage_dict()
+        loadavg = self._get_loadavg_dict()
         memory_usage = self._get_memory_usage_dict()
         network_usage = self._get_network_flow_rate_dict()
         disk_usage = self._get_disk_usage_rate_dict()
         all_system_usage_dict = {
             'cpuUsage': cpu_usage['cpu_usage'],
             'memUsage': memory_usage['used_memory'],
-            'ip': network_usage['ip'],
             'networkReceive': network_usage['receive_rate'],
             'networkTransfer': network_usage['transfer_rate'],
             'diskUsage': disk_usage['used_disk'],
@@ -524,7 +567,9 @@ class GetSystemUsage(object):
             'diskWriteDelay': disk_usage['disk_write_delay'],
             'diskReadDelay': disk_usage['disk_read_delay'],
             'diskPartition': [disk_usage['disk_partition_info'],
-                              disk_usage['disk_partition_data']]
+                              disk_usage['disk_partition_data']],
+            'loadavg_5': loadavg['loadavg_5'],
+            'memUsageRate': memory_usage['memory_usage_rate']
         }
 
         return all_system_usage_dict
@@ -574,8 +619,8 @@ class DataFormater(object):
 
         if metadata_dict['service'] == 'openstack' or \
                         metadata_dict['service'] == 'NVS':
-            # for openstack resource_id is store VM name
-            identify_id = all_usage_dict['ip']
+            # for openstack resource_id is store VM ip (eth0)
+            identify_id = get_ip_by_ifname(NET_CARD_LIST[0])
         else:
             identify_id = metadata_dict['resource_id']
 
@@ -611,13 +656,16 @@ class DataFormater(object):
                         }
                         for partition_name in partition_datas:
                             if partition_name in partition_info['sys']:
-                                partition_identity = 'primary'
+                                partition_identity = 'system'
                             elif partition_name in partition_info['logic']:
-                                partition_identity = 'logical'
+                                partition_identity = 'logic'
                             else:
                                 continue
-                            dimensions = 'partition=' + partition_identity + \
-                                    '::' + identify_id + '::' + partition_name
+                            # for partition data dimensions is like
+                            # partition=1.1.1.1#::#system#::#vda1
+                            dimensions = 'partition=' + identify_id + \
+                                    '#::#' + partition_identity + \
+                                    '#::#' + partition_name
                             for parti_data_name in \
                                             partition_datas[partition_name]:
                                 parti_metric_name = \
@@ -632,6 +680,8 @@ class DataFormater(object):
                                     parti_unit)
                                 metric_datas['metricDatas'].append(metric_data)
                     elif metric_type != 'diskPartition':
+                        # for normal data dimensions is like
+                        # openstack=1.1.1.1  or  RDS=1234567890
                         dimensions = metadata_dict['resource_type'] + '=' + \
                                                                     identify_id
                         metric_data = self._setting_params(metric_type,
@@ -651,7 +701,8 @@ class SendRequest(object):
                  headers={'Content-type': 'application/x-www-form-urlencoded'},
                  http_method='POST',
                  system_partitions=None,
-                 logic_partitions=None):
+                 logic_partitions=None,
+                 parti_dimension=None):
         self.url = metadata_dict['monitorWebServerUrl']
         self.request_uri = request_uri
         self.headers = headers
@@ -663,6 +714,7 @@ class SendRequest(object):
         self.metric_datas_json = metric_datas_json
         self.system_partitions = system_partitions
         self.logic_partitions = logic_partitions
+        self.parti_dimension = parti_dimension
 
     def send_request_to_server(self):
         '''
@@ -680,13 +732,17 @@ class SendRequest(object):
             params_dict['SystemPartitions'] = self.system_partitions
         if self.logic_partitions != None:
             params_dict['LogicPartitions'] = self.logic_partitions
+        if self.parti_dimension != None:
+            params_dict['Dimension'] = self.parti_dimension
         params = urllib.urlencode(params_dict)
 
         if str(self.url).startswith('http://'):
             self.url = str(self.url).split("http://")[-1]
         conn = httplib.HTTPConnection(self.url)
         conn.request(self.http_method, self.request_uri, params, self.headers)
+        response = conn.getresponse()
         conn.close()
+        return response
 
     def generate_stringToSign(self):
         '''
@@ -699,11 +755,12 @@ class SendRequest(object):
                                     (self.access_key, self.metric_datas_json,
                                      self.name_space, self.project_id))
         elif self.system_partitions != None:
-            canonicalized_resources = ('AccessKey=%s&LogicPartitions&'
-                                       'Namespace=%s&ProjectId=%s&'
-                                       'SystemPartitions=%s' %
-                                       (self.access_key, self.logic_partitions,
-                                        self.name_space, self.project_id,
+            canonicalized_resources = ('AccessKey=%s&Dimension=%s&'
+                                       'LogicPartitions=%s&Namespace=%s&'
+                                       'ProjectId=%s&SystemPartitions=%s' %
+                                       (self.access_key, self.parti_dimension,
+                                        self.logic_partitions, self.name_space,
+                                        self.project_id,
                                         self.system_partitions))
         else:
             raise Exception()
