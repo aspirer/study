@@ -1,8 +1,11 @@
-commit 56882dc5ea1710a0bed4046d01edac89bef423a1
+commit 7b6e47be70b7f98ea5187f701fc3900579dae952
 Author: Wangpan <hzwangpan@corp.netease.com>
 Date:   Thu May 16 17:59:56 2013 +0800
 
-    add nbs volume attachment process
+    decouple nbs and nvs
+    
+    1. add nbs volume attachment process
+    2. add nbs volume detachment process
     
     Change-Id: Ia9f003f498a3748028ce89879d6eaf5685bcad94
 
@@ -108,7 +111,7 @@ index d9368a4..175230e 100644
  class Server_status(extensions.ExtensionDescriptor):
      """Add server_status to the Create Server v1.1 API"""
 diff --git a/nova/api/openstack/compute/contrib/volumes.py b/nova/api/openstack/compute/contrib/volumes.py
-index 9940e30..c10c8e6 100644
+index 9940e30..0454dff 100644
 --- a/nova/api/openstack/compute/contrib/volumes.py
 +++ b/nova/api/openstack/compute/contrib/volumes.py
 @@ -15,6 +15,7 @@
@@ -119,7 +122,7 @@ index 9940e30..c10c8e6 100644
  import webob
  from webob import exc
  from xml.dom import minidom
-@@ -375,9 +376,64 @@ class VolumeAttachmentController(wsgi.Controller):
+@@ -375,9 +376,66 @@ class VolumeAttachmentController(wsgi.Controller):
              instance['uuid'],
              assigned_mountpoint)}
  
@@ -138,6 +141,8 @@ index 9940e30..c10c8e6 100644
 +
 +        try:
 +            instance = self.compute_api.get(context, server_id)
++            # TODO(wangpan): if the instance forbid to attach nbs volume,
++            #                raise exception.
 +            # Check os status if instance is 'ACTIVE'
 +            if instance['status'] == "ACTIVE":
 +                server_heartbeat_period = FLAGS.get('server_heartbeat_period',
@@ -184,8 +189,55 @@ index 9940e30..c10c8e6 100644
          context = req.environ['nova.context']
          authorize(context)
  
+@@ -420,8 +478,46 @@ class VolumeAttachmentController(wsgi.Controller):
+         """Update a volume attachment.  We don't currently support this."""
+         raise exc.HTTPBadRequest()
+ 
++    def _detach_nbs_volume(self, req, server_id, id):
++        """Detach a nbs volume from an instance."""
++
++        context = req.environ['nova.context']
++        authorize(context)
++
++        volume_id = id
++        LOG.audit(_("Detach nbs volume %s from instance %s"),
++                    (volume_id, server_id), context=context)
++
++        try:
++            instance = self.compute_api.get(context, server_id)
++        except exception.NotFound:
++            raise exc.HTTPNotFound()
++
++        bdms = self.compute_api.get_instance_bdms(context, instance)
++
++        if not bdms:
++            LOG.debug(_("Instance %s is not attached."), server_id)
++            raise exc.HTTPNotFound()
++
++        found = False
++        for bdm in bdms:
++            if bdm['volume_id'] == volume_id:
++                self.compute_api.detach_nbs_volume(context,
++                    instance, volume_id)
++                found = True
++                break
++
++        if not found:
++            raise exc.HTTPNotFound()
++        else:
++            return webob.Response(status_int=202)
++
+     def delete(self, req, server_id, id):
+         """Detach a volume from an instance."""
++        # Go to our owned process if we are attaching a nbs volume
++        if FLAGS.ebs_backend == 'nbs':
++            return self._detach_nbs_volume(req, server_id, id)
++
+         context = req.environ['nova.context']
+         authorize(context)
+ 
 diff --git a/nova/compute/api.py b/nova/compute/api.py
-index bd417fe..df652f3 100644
+index bd417fe..4a7913e 100644
 --- a/nova/compute/api.py
 +++ b/nova/compute/api.py
 @@ -22,12 +22,15 @@
@@ -212,7 +264,7 @@ index bd417fe..df652f3 100644
  
  
  def check_instance_state(vm_state=None, task_state=(None,)):
-@@ -2104,6 +2108,63 @@ class API(base.Base):
+@@ -2104,6 +2108,66 @@ class API(base.Base):
          """Inject network info for the instance."""
          self.compute_rpcapi.inject_network_info(context, instance=instance)
  
@@ -263,36 +315,63 @@ index bd417fe..df652f3 100644
 +        #             have to make sure that they are assigned atomically.
 +        device = self.compute_rpcapi.get_device_for_nbs_volume(
 +                        context, instance=instance)
-+        try:
++        if device is None:
++            # can't find a slot or target dev to attach
++            raise xxxxx
++        #try:
 +            self.compute_rpcapi.attach_nbs_volume(context, instance=instance,
-+                    volume_id=volume_id, mountpoint=device)
-+        except Exception:
-+            with excutils.save_and_reraise_exception():
-+                self.db.block_device_mapping_destroy_by_instance_and_device(
-+                        context, instance['uuid'], device)
++                    volume_id=volume_id, device=device)
++        #except Exception:
++        #    with excutils.save_and_reraise_exception():
++        #        self.db.block_device_mapping_destroy_by_instance_and_device(
++        #                context, instance['uuid'], device)
 +
-+        return device
++        return device['real_path']
 +
      @wrap_check_policy
      @check_instance_lock
      def attach_volume(self, context, instance, volume_id, device=None):
+@@ -2135,6 +2199,22 @@ class API(base.Base):
+         return device
+ 
+     @check_instance_lock
++    def detach_nbs_volume(self, context, instance, volume_id):
++        """Detach a volume from an instance."""
++        volume = self.nbs_client.get(context, volume_id)
++        # FIXME(wangpan): how to deal with 'attached'?
++        if volume['status'] != 'attachedVM':
++            msg = _("Volume must be attached in order to detach.")
++            raise exception.InvalidVolume(reason=msg)
++
++        if volume['instance_uuid'] != instance['uuid']:
++            raise exception.VolumeUnattached(volume_id=volume_id)
++
++        check_policy(context, 'detach_volume', instance)
++        self.compute_rpcapi.detach_nbs_volume(context, instance=instance,
++                volume_id=volume_id)
++
++    @check_instance_lock
+     def _detach_volume(self, context, instance, volume_id):
+         check_policy(context, 'detach_volume', instance)
+ 
 diff --git a/nova/compute/manager.py b/nova/compute/manager.py
-index e863e73..8575ce7 100644
+index e863e73..04e438c 100644
 --- a/nova/compute/manager.py
 +++ b/nova/compute/manager.py
-@@ -2878,6 +2878,22 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -2878,6 +2878,23 @@ class ComputeManager(manager.SchedulerDependentManager):
      @exception.wrap_exception(notifier=notifier, publisher_id=publisher_id())
      @reverts_task_state
      @wrap_instance_fault
-+    def get_device_for_nbs_volume(self, context, instance):
++    def get_device_for_nbs_volume(self, context, instance, used_dev=None):
 +
 +        @utils.synchronized(instance['uuid'])
 +        def do_reserve():
-+            result = compute_utils.get_device_for_nbs_volume(context, instance)
++            result = self.driver.get_device_for_nbs_volume(instance['name'],
++                                                           used_dev)
 +
 +            # NOTE(vish): create bdm here to avoid race condition
 +            values = {'instance_uuid': instance['uuid'],
-+                      'device_name': result}
++                      'device_name': jsonutils.dumps(result)}
 +            self.db.block_device_mapping_create(context, values)
 +            return result
 +        return do_reserve()
@@ -303,41 +382,81 @@ index e863e73..8575ce7 100644
      def reserve_block_device_name(self, context, instance, device):
  
          @utils.synchronized(instance['uuid'])
-@@ -2895,6 +2911,58 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -2895,6 +2912,98 @@ class ComputeManager(manager.SchedulerDependentManager):
      @exception.wrap_exception(notifier=notifier, publisher_id=publisher_id())
      @reverts_task_state
      @wrap_instance_fault
-+    def attach_nbs_volume(self, context, volume_id, mountpoint, instance):
++    def attach_nbs_volume(self, context, volume_id, device, instance):
 +        """Attach a nbs volume to an instance."""
++        # TODO(wangpan): if this host can't attach nbs volume, raise exception
 +        try:
 +            return self._attach_nbs_volume(context, volume_id,
-+                                           mountpoint, instance)
++                                           device, instance)
 +        except Exception:
 +            with excutils.save_and_reraise_exception():
 +                self.db.block_device_mapping_destroy_by_instance_and_device(
-+                        context, instance.get('uuid'), mountpoint)
++                        context, instance.get('uuid'), jsonutils.dumps(device))
 +
-+    def _attach_nbs_volume(self, context, volume_id, mountpoint, instance):
++    def _attach_nbs_volume(self, context, volume_id, device, instance):
 +        context = context.elevated()
-+        LOG.audit(_('Attaching nbs volume %(volume_id)s to %(mountpoint)s'),
++        LOG.audit(_('Attaching nbs volume %(volume_id)s to %(device)s'),
 +                  locals(), context=context, instance=instance)
 +        try:
 +            # call nbs to attach volume to host
 +
++            # check volume status
++
++            # get host dev path and QoS params from nbs
++
 +        except Exception:  # pylint: disable=W0702
 +            with excutils.save_and_reraise_exception():
 +                msg = _("Failed to connect to volume %(volume_id)s "
-+                        "while attaching at %(mountpoint)s")
++                        "while attaching at %(device)s")
 +                LOG.exception(msg % locals(), context=context,
 +                              instance=instance)
 +                # notify nbs attach failed
 +
++        @utils.synchronized(instance['uuid'])
++        def get_new_device(used_dev):
++            result = self.driver.get_device_for_nbs_volume(instance['name'],
++                                                           used_dev)
++
++            # NOTE(vish): create bdm here to avoid race condition
++            values = {'instance_uuid': instance['uuid'],
++                      'device_name': result}
++            self.db.block_device_mapping_update_or_create(context, values)
++            return result
++
 +        try:
-+            self.driver.attach_nbs_volume(instance['name'], mountpoint)
++            used_dev = {'dev': [], 'slot': []}
++            retry = True
++            while retry:
++                retry, used = self.driver.attach_nbs_volume(instance['name'],
++                                    device, host_dev, qos_info, volume_id)
++                if retry:
++                    if used['dev']:
++                        used_dev['dev'].append(used['dev'])
++                    elif used['slot']:
++                        used_dev['slot'].append(used['slot'])
++                    device = get_new_device(used_dev)
++                    if device is None:
++                        # can't find a slot or target dev to attach
++                        raise xxxx
++                    LOG.info(_("Retry to attach nbs volume %s at %s"
++                            % (volume_id, device),
++                            context=context, instance=instance)
++#        except notfound:
++#            # instance disappear
++#            LOG.error(_("Instance disappeared during attaching nbs volume %s "
++#                        "at %s" % (volume_id, device),
++ #                       context=context, instance=instance)
++#            # notify nbs attach failed
++#
++ #           return
 +        except Exception:  # pylint: disable=W0702
 +            with excutils.save_and_reraise_exception():
-+                msg = _("Failed to attach volume %(volume_id)s "
-+                        "at %(mountpoint)s")
++                msg = _("Failed to attach nbs volume %(volume_id)s "
++                        "at %(device)s")
 +                LOG.exception(msg % locals(), context=context,
 +                              instance=instance)
 +                # notify nbs attach failed
@@ -347,7 +466,7 @@ index e863e73..8575ce7 100644
 +        values = {
 +            'instance_uuid': instance['uuid'],
 +            'connection_info': None,
-+            'device_name': mountpoint,
++            'device_name': jsonutils.dumps(device),
 +            'delete_on_termination': False,
 +            'virtual_name': None,
 +            'snapshot_id': None,
@@ -362,25 +481,73 @@ index e863e73..8575ce7 100644
      def attach_volume(self, context, volume_id, mountpoint, instance):
          """Attach a volume to an instance."""
          try:
+@@ -2956,6 +3065,35 @@ class ComputeManager(manager.SchedulerDependentManager):
+             'no_device': None}
+         self.db.block_device_mapping_update_or_create(context, values)
+ 
++    def _detach_nbs_volume(self, context, instance, bdm):
++        """Do the actual driver detach using block device mapping."""
++        mp = jsonutils.loads(bdm['device_name'])['mountpoint']
++        volume_id = bdm['volume_id']
++
++        LOG.audit(_('Detach volume %(volume_id)s from mountpoint %(mp)s'),
++                  locals(), context=context, instance=instance)
++
++        try:
++            self.driver.detach_nbs_volume(instance['name'], mp)
++        except Exception:  # pylint: disable=W0702
++            msg = _("Faild to detach volume %(volume_id)s from %(mp)s")
++            LOG.exception(msg % locals(), context=context, instance=instance)
++
++    @exception.wrap_exception(notifier=notifier, publisher_id=publisher_id())
++    @reverts_task_state
++    @wrap_instance_fault
++    def detach_nbs_volume(self, context, volume_id, instance):
++        """Detach a nbs volume from an instance."""
++        bdm = self._get_instance_volume_bdm(context, instance['uuid'],
++                                            volume_id)
++        self._detach_nbs_volume(context, instance, bdm)
++        # call nbs to detach volume from host
++        self.nbs_client.detach(context, volume)
++        # check result and log it
++        if succ:
++            self.db.block_device_mapping_destroy_by_instance_and_volume(
++                    context, instance['uuid'], volume_id)
++
+     def _detach_volume(self, context, instance, bdm):
+         """Do the actual driver detach using block device mapping."""
+         mp = bdm['device_name']
 diff --git a/nova/compute/rpcapi.py b/nova/compute/rpcapi.py
-index 0cd2668..f7c4c0b 100644
+index 0cd2668..6c4f90d 100644
 --- a/nova/compute/rpcapi.py
 +++ b/nova/compute/rpcapi.py
-@@ -170,6 +170,13 @@ class ComputeAPI(nova.openstack.common.rpc.proxy.RpcProxy):
+@@ -170,6 +170,12 @@ class ComputeAPI(nova.openstack.common.rpc.proxy.RpcProxy):
                  instance=instance_p, network_id=network_id),
                  topic=_compute_topic(self.topic, ctxt, None, instance))
  
 +    def attach_nbs_volume(self, ctxt, instance, volume_id, mountpoint):
 +        instance_p = jsonutils.to_primitive(instance)
 +        self.cast(ctxt, self.make_msg('attach_nbs_volume',
-+                instance=instance_p, volume_id=volume_id,
-+                mountpoint=mountpoint),
++                instance=instance_p, volume_id=volume_id, device=device),
 +                topic=_compute_topic(self.topic, ctxt, None, instance))
 +
      def attach_volume(self, ctxt, instance, volume_id, mountpoint):
          instance_p = jsonutils.to_primitive(instance)
          self.cast(ctxt, self.make_msg('attach_volume',
-@@ -458,6 +465,12 @@ class ComputeAPI(nova.openstack.common.rpc.proxy.RpcProxy):
+@@ -210,6 +216,12 @@ class ComputeAPI(nova.openstack.common.rpc.proxy.RpcProxy):
+                 reservations=reservations),
+                 topic=_compute_topic(self.topic, ctxt, host, instance))
+ 
++    def detach_nbs_volume(self, ctxt, instance, volume_id):
++        instance_p = jsonutils.to_primitive(instance)
++        self.cast(ctxt, self.make_msg('detach_nbs_volume',
++                instance=instance_p, volume_id=volume_id),
++                topic=_compute_topic(self.topic, ctxt, None, instance))
++
+     def detach_volume(self, ctxt, instance, volume_id):
+         instance_p = jsonutils.to_primitive(instance)
+         self.cast(ctxt, self.make_msg('detach_volume',
+@@ -458,6 +470,12 @@ class ComputeAPI(nova.openstack.common.rpc.proxy.RpcProxy):
          topic = _compute_topic(self.topic, ctxt, host, None)
          return self.call(ctxt, self.make_msg('get_host_uptime'), topic)
  
@@ -394,20 +561,19 @@ index 0cd2668..f7c4c0b 100644
          instance_p = jsonutils.to_primitive(instance)
          return self.call(ctxt, self.make_msg('reserve_block_device_name',
 diff --git a/nova/compute/utils.py b/nova/compute/utils.py
-index a8a0a65..ac51798 100644
+index a8a0a65..f331510 100644
 --- a/nova/compute/utils.py
 +++ b/nova/compute/utils.py
-@@ -55,6 +55,8 @@ def add_instance_fault_from_exc(context, instance_uuid, fault, exc_info=None):
+@@ -55,7 +55,6 @@ def add_instance_fault_from_exc(context, instance_uuid, fault, exc_info=None):
      }
      db.instance_fault_create(context, values)
  
-+def get_device_for_nbs_volume(context, instance):
-+    """ """
- 
+-
  def get_device_name_for_instance(context, instance, device):
      """Validates (or generates) a device name for instance.
+ 
 diff --git a/nova/flags.py b/nova/flags.py
-index c0112ce..88aca46 100644
+index c0112ce..934f1b5 100644
 --- a/nova/flags.py
 +++ b/nova/flags.py
 @@ -230,6 +230,31 @@ resize_opts = [
@@ -434,7 +600,7 @@ index c0112ce..88aca46 100644
 +    cfg.StrOpt('nbs_mountpoint_prefix',
 +               default='nbs',
 +               help='mount point prefix of nbs disk displays in vm, may like '
-+                    '/dev/nbs/xydz'),
++                    '/dev/nbs/xd'),
 +]
 +
 +FLAGS.register_opts(nbs_opts)
@@ -443,41 +609,166 @@ index c0112ce..88aca46 100644
      cfg.StrOpt('my_ip',
                 default=_get_my_ip(),
 diff --git a/nova/virt/libvirt/driver.py b/nova/virt/libvirt/driver.py
-index 5bd7529..42a2c8a 100644
+index 5bd7529..625fbe1 100644
 --- a/nova/virt/libvirt/driver.py
 +++ b/nova/virt/libvirt/driver.py
-@@ -735,6 +735,34 @@ class LibvirtDriver(driver.ComputeDriver):
+@@ -734,6 +734,120 @@ class LibvirtDriver(driver.ComputeDriver):
+         method = getattr(driver, method_name)
          return method(connection_info, *args, **kwargs)
  
-     @exception.wrap_exception()
-+    def attach_nbs_volume(self, instance_name, mountpoint):
++    def _slot_to_disk(self, slot):
++        ascii_table = "abcdefghijklmnopqrstuvwxyz"
++        nums = slot
++        nbs_disk = ''
++        while nums > 0:
++            value = nums % 26
++            ch = ascii_table[value:value + 1]
++            nbs_disk = ch + nbs_disk
++            nums = nums / 26
++        return nbs_disk
++
++    # FIXME(wangpan): we find that only slot id is non-zero in pci address,
++    #                 such as: <address type='pci'
++    #                           domain='0x0000'
++    #                           bus='0x00'
++    #                           slot='0x03'
++    #                           function='0x0'/>
++    #                 so we only find a free slot of domain.
++    def _find_free_dev_and_pcislot(self, instance_name, used_dev):
++        virt_dom = self._lookup_by_name(instance_name)
++        dom_xml = virt_dom.XMLDesc(0)
++        doc = etree.fromstring(dom_xml)
++        devices = doc.findall('./devices/')
++        used_pci_slot_ids = [int(device.find('address').attrib['slot'], 16)
++                                for device in devices
++                                    if device.find('address') is not None]
++        disks = doc.findall('./devices/disk')
++        used_disk_devs = [disk.find('target').attrib['dev'] for disk in disks]
++
++        free_slot = None
++        free_dev = None
++
++        # slot id range is 0-31
++        for id in range(31, 0, -1):
++            if id not in used_pci_slot_ids and id not in used_dev['slot']:
++                free_slot = id
++
++        # vd[c-z]
++        for i in range(99, 123):
++            dev = 'vd' + chr(i)
++            if dev not in used_disk_devs and dev not in used_dev['dev']:
++                free_dev = dev
++
++        return (free_slot, free_dev)
++
++
++    def get_device_for_nbs_volume(instance_name, used_dev):
++        """Generates a device name for attaching nbs volume"""
++        free_slot, free_dev = self._find_free_dev_and_pcislot(instance_name,
++                                                                used_dev)
++        if free_slot is None or free_dev is None:
++            return None
++
++        real_path = FLAGS.nbs_mountpoint_prefix + self._slot_to_disk(free_slot)
++        target_dev = '/dev/' + free_dev
++
++        return {'mountpoint': target_dev,
++                'real_path': real_path,
++                'slot': free_slot}
++
++    @exception.wrap_exception()
++    def attach_nbs_volume(self, instance_name, device, host_dev,
++                          qos_info, volume_id):
++        """
++            return retry or not, if need retry, used device is returned, too.
++        """
 +        if FLAGS.libvirt_type == 'lxc':
 +            LOG.error(_("LXC hypervisor is not supported to attach volume."))
-+            raise
++            raise notsupported
++
++        mount_device = device['mountpoint'].rpartition("/")[2]
++        slot = device['slot']
++        iotune_total_bytes = qos_info['iotune_total_bytes']
++        iotune_total_iops = qos_info['iotune_total_iops']
++        disk_xml = '''<disk type='block'>
++                        <driver name='qemu' type='raw' cache='none'/>
++                        <source dev='%s'/>
++                        <target dev='%s' bus='virtio'/>
++                        <address type='pci' domain='0x0000' \
++                         bus='0x00' slot='0x%0.2x' function='0x0'/>
++                        <iotune>
++                          <total_bytes_sec>%d</total_bytes_sec>
++                          <total_iops_sec>%d</total_iops_sec>
++                        </iotune>
++                        <serial>%s</serial>
++                      </disk>''' % (host_dev, mount_device, slot,
++                                    iotune_total_bytes, iotune_total_iops,
++                                    volume_id)
 +
 +        virt_dom = self._lookup_by_name(instance_name)
-+        mount_device = mountpoint.rpartition("/")[2]
-+
 +        try:
-+            virt_dom.attachDevice(conf.to_xml())
-+        except Exception, ex:
++            # NOTE(vish): We can always affect config because our
++            #             domains are persistent, but we should only
++            #             affect live if the domain is running.
++            flags = libvirt.VIR_DOMAIN_AFFECT_CONFIG
++            state = LIBVIRT_POWER_STATE[virt_dom.info()[0]]
++            if state == power_state.RUNNING:
++                flags |= libvirt.VIR_DOMAIN_AFFECT_LIVE
++            virt_dom.attachDeviceFlags(disk_xml, flags)
++            return (False, None)
++        except Exception as ex:
 +            if isinstance(ex, libvirt.libvirtError):
 +                errcode = ex.get_error_code()
 +                if errcode == libvirt.VIR_ERR_OPERATION_FAILED:
-+                    LOG.error(_("attach volume failed"))
-+                    raise exception.DeviceIsBusy(device=mount_device)
++                    raise exception.DeviceIsBusy(device=disk_dev)
++                elif errcode == libvirt.VIR_ERR_INVALID_ARG:
++                    # target dev already exists
++                    return (True, {'dev': mount_device})
++                elif errcode == libvirt.VIR_ERR_XML_ERROR:
++                    # pci slot already used
++                    return (True, {'slot': slot})
++            else:
++                raise ex
 +
-+            with excutils.save_and_reraise_exception():
-+                LOG.error(_("attach volume failed"))
-+
-+        # TODO(danms) once libvirt has support for LXC hotplug,
-+        # replace this re-define with use of the
-+        # VIR_DOMAIN_AFFECT_LIVE & VIR_DOMAIN_AFFECT_CONFIG flags with
-+        # attachDevice()
-+        domxml = virt_dom.XMLDesc(libvirt.VIR_DOMAIN_XML_SECURE)
-+        self._conn.defineXML(domxml)
-+
-+    @exception.wrap_exception()
+     @exception.wrap_exception()
      def attach_volume(self, connection_info, instance_name, mountpoint):
          virt_dom = self._lookup_by_name(instance_name)
+@@ -792,6 +906,38 @@ class LibvirtDriver(driver.ComputeDriver):
+         return xml
+ 
+     @exception.wrap_exception()
++    def detach_nbs_volume(self, instance_name, mountpoint):
++        if FLAGS.libvirt_type == 'lxc':
++            LOG.error(_("LXC hypervisor is not supported to attach volume."))
++            raise notsupported
++
++        mount_device = mountpoint.rpartition("/")[2]
++        try:
++            # NOTE(vish): This is called to cleanup volumes after live
++            #             migration, so we should still logout even if
++            #             the instance doesn't exist here anymore.
++            virt_dom = self._lookup_by_name(instance_name)
++            xml = self._get_disk_xml(virt_dom.XMLDesc(0), mount_device)
++            if not xml:
++                raise exception.DiskNotFound(location=mount_device)
++            else:
++                flags = libvirt.VIR_DOMAIN_AFFECT_CONFIG
++                state = LIBVIRT_POWER_STATE[virt_dom.info()[0]]
++                if state == power_state.RUNNING:
++                    flags |= libvirt.VIR_DOMAIN_AFFECT_LIVE
++                virt_dom.detachDeviceFlags(xml, flags)
++        except libvirt.libvirtError as ex:
++            # NOTE(vish): This is called to cleanup volumes after live
++            #             migration, so we should still disconnect even if
++            #             the instance doesn't exist here anymore.
++            error_code = ex.get_error_code()
++            if error_code == libvirt.VIR_ERR_NO_DOMAIN:
++                # NOTE(vish):
++                LOG.warn(_("During detach_volume, instance disappeared."))
++            else:
++                raise
++
++    @exception.wrap_exception()
+     def detach_volume(self, connection_info, instance_name, mountpoint):
          mount_device = mountpoint.rpartition("/")[2]
+         try:
