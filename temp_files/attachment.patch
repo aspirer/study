@@ -1,4 +1,4 @@
-commit 7b6e47be70b7f98ea5187f701fc3900579dae952
+commit 63b833ccf24ed0bb0b85341ddfcec6983f19e209
 Author: Wangpan <hzwangpan@corp.netease.com>
 Date:   Thu May 16 17:59:56 2013 +0800
 
@@ -6,6 +6,7 @@ Date:   Thu May 16 17:59:56 2013 +0800
     
     1. add nbs volume attachment process
     2. add nbs volume detachment process
+    3. add nbs volume extension process
     
     Change-Id: Ia9f003f498a3748028ce89879d6eaf5685bcad94
 
@@ -111,7 +112,7 @@ index d9368a4..175230e 100644
  class Server_status(extensions.ExtensionDescriptor):
      """Add server_status to the Create Server v1.1 API"""
 diff --git a/nova/api/openstack/compute/contrib/volumes.py b/nova/api/openstack/compute/contrib/volumes.py
-index 9940e30..0454dff 100644
+index 9940e30..f71a390 100644
 --- a/nova/api/openstack/compute/contrib/volumes.py
 +++ b/nova/api/openstack/compute/contrib/volumes.py
 @@ -15,6 +15,7 @@
@@ -122,7 +123,69 @@ index 9940e30..0454dff 100644
  import webob
  from webob import exc
  from xml.dom import minidom
-@@ -375,9 +376,66 @@ class VolumeAttachmentController(wsgi.Controller):
+@@ -164,6 +165,7 @@ class VolumeController(wsgi.Controller):
+     """The Volumes API controller for the OpenStack API."""
+ 
+     def __init__(self):
++        self.compute_api = compute.API()
+         self.volume_api = volume.API()
+         super(VolumeController, self).__init__()
+ 
+@@ -271,6 +273,53 @@ class VolumeController(wsgi.Controller):
+ 
+         return wsgi.ResponseObject(result, headers=dict(location=location))
+ 
++    def _extend_nbs_volume(self, req, id, body):
++        """ """
++        context = req.environ['nova.context']
++        authorize(context)
++
++        if not self.is_valid_body(body, 'size'):
++            raise exc.HTTPUnprocessableEntity()
++        try:
++            instance_uuid = self.compute_api.check_nbs_attached(context, id)
++        except NotFound:
++            raise NotFound
++        size = int(body['size']) # GB
++        # call nbs to extend this volume firstly
++
++        if instance_uuid:
++            try:
++                # check instance exists
++                instance = self.compute_api.get(context, instance_uuid)
++                # Check os status if instance is 'ACTIVE'
++                if instance['status'] == "ACTIVE":
++                    server_heartbeat_period = FLAGS.get(
++                                                'server_heartbeat_period', 10)
++                    os_status = self.compute_api.instance_os_boot_ready(
++                                                    context,
++                                                    instance['uuid'],
++                                                    server_heartbeat_period)
++                    if os_status['status'] != "up":
++                        explanation = _("Can't extend volume while instance "
++                                        "os is starting.")
++                        raise exc.HTTPForbidden(explanation=explanation)
++            except NotFound:
++                raise NotFound
++
++            # notify instance about this extension
++            self.compute_api.extend_nbs_volume(context, instance, id, size)
++        else:
++            return {}
++
++    # @wsgi.serializers(xml=VolumesTemplate)
++    def update(self, req, id, body):
++        """Extend a exists nbs volume."""
++        if FLAGS.ebs_backend == 'nbs':
++            return self._extend_nbs_volume(req, id, body)
++        else:
++            raise exc.HTTPBadRequest()
++
++
+ 
+ def _translate_attachment_detail_view(volume_id, instance_uuid, mountpoint):
+     """Maps keys for attachment details view."""
+@@ -375,9 +424,66 @@ class VolumeAttachmentController(wsgi.Controller):
              instance['uuid'],
              assigned_mountpoint)}
  
@@ -189,7 +252,7 @@ index 9940e30..0454dff 100644
          context = req.environ['nova.context']
          authorize(context)
  
-@@ -420,8 +478,46 @@ class VolumeAttachmentController(wsgi.Controller):
+@@ -420,8 +526,46 @@ class VolumeAttachmentController(wsgi.Controller):
          """Update a volume attachment.  We don't currently support this."""
          raise exc.HTTPBadRequest()
  
@@ -237,7 +300,7 @@ index 9940e30..0454dff 100644
          authorize(context)
  
 diff --git a/nova/compute/api.py b/nova/compute/api.py
-index bd417fe..4a7913e 100644
+index bd417fe..b6a6d67 100644
 --- a/nova/compute/api.py
 +++ b/nova/compute/api.py
 @@ -22,12 +22,15 @@
@@ -264,7 +327,7 @@ index bd417fe..4a7913e 100644
  
  
  def check_instance_state(vm_state=None, task_state=(None,)):
-@@ -2104,6 +2108,66 @@ class API(base.Base):
+@@ -2104,6 +2108,87 @@ class API(base.Base):
          """Inject network info for the instance."""
          self.compute_rpcapi.inject_network_info(context, instance=instance)
  
@@ -304,7 +367,28 @@ index bd417fe..4a7913e 100644
 +        return {'instance_uuid': instance_uuid,
 +                'status': status}
 +
-+    @wrap_check_policy
++    @wrap_check_policy#####
++    @check_instance_lock
++    def check_nbs_attached(self, context, volume_id):
++        """ """
++        # call nbs to get the volume info
++        try:
++            volume = self.nbs_client.get(context, volume_id)
++        except notfound:
++            raise notfound
++        if volume['status'] != "attachedVM":
++            return volume['instanceId']
++        else:
++            return None
++
++    @wrap_check_policy#####
++    @check_instance_lock
++    def extend_nbs_volume(self, context, instance, volume_id, size):
++        """ """
++        self.compute_rpcapi.extend_nbs_volume(context, instance=instance,
++                    volume_id=volume_id, size=size, device=None)
++
++    @wrap_check_policy#####
 +    @check_instance_lock
 +    def attach_nbs_volume(self, context, instance, volume_id):
 +        """Attach an existing volume to an existing instance."""
@@ -331,7 +415,7 @@ index bd417fe..4a7913e 100644
      @wrap_check_policy
      @check_instance_lock
      def attach_volume(self, context, instance, volume_id, device=None):
-@@ -2135,6 +2199,22 @@ class API(base.Base):
+@@ -2135,6 +2220,22 @@ class API(base.Base):
          return device
  
      @check_instance_lock
@@ -355,7 +439,7 @@ index bd417fe..4a7913e 100644
          check_policy(context, 'detach_volume', instance)
  
 diff --git a/nova/compute/manager.py b/nova/compute/manager.py
-index e863e73..04e438c 100644
+index e863e73..afc13f2 100644
 --- a/nova/compute/manager.py
 +++ b/nova/compute/manager.py
 @@ -2878,6 +2878,23 @@ class ComputeManager(manager.SchedulerDependentManager):
@@ -382,10 +466,29 @@ index e863e73..04e438c 100644
      def reserve_block_device_name(self, context, instance, device):
  
          @utils.synchronized(instance['uuid'])
-@@ -2895,6 +2912,98 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -2895,6 +2912,117 @@ class ComputeManager(manager.SchedulerDependentManager):
      @exception.wrap_exception(notifier=notifier, publisher_id=publisher_id())
      @reverts_task_state
      @wrap_instance_fault
++    def extend_nbs_volume(self, context, instance, volume_id, size, device):
++        """Extend a nbs volume which has been attached on an instance."""
++        # Get attached device from nova db
++        if device is None:
++            bdm = self._get_instance_volume_bdm(context, instance['uuid'],
++                                                volume_id)
++            device = jsonutils.loads(bdm['device_name'])
++        # TODO(wangpan): if this host can't attach nbs volume, raise exception
++        try:
++            return self.driver.extend_nbs_volume(instance, device, size)
++        except Exception:
++            CCXXXX
++            # notify nbs extend failed
++        else:
++            # notify nbs extend OK
++
++    @exception.wrap_exception(notifier=notifier, publisher_id=publisher_id())
++    @reverts_task_state
++    @wrap_instance_fault
 +    def attach_nbs_volume(self, context, volume_id, device, instance):
 +        """Attach a nbs volume to an instance."""
 +        # TODO(wangpan): if this host can't attach nbs volume, raise exception
@@ -460,8 +563,8 @@ index e863e73..04e438c 100644
 +                LOG.exception(msg % locals(), context=context,
 +                              instance=instance)
 +                # notify nbs attach failed
-+
-+        # notify nbs attach successfully
++        else:
++            # notify nbs attach successfully
 +
 +        values = {
 +            'instance_uuid': instance['uuid'],
@@ -481,7 +584,7 @@ index e863e73..04e438c 100644
      def attach_volume(self, context, volume_id, mountpoint, instance):
          """Attach a volume to an instance."""
          try:
-@@ -2956,6 +3065,35 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -2956,6 +3084,35 @@ class ComputeManager(manager.SchedulerDependentManager):
              'no_device': None}
          self.db.block_device_mapping_update_or_create(context, values)
  
@@ -518,14 +621,21 @@ index e863e73..04e438c 100644
          """Do the actual driver detach using block device mapping."""
          mp = bdm['device_name']
 diff --git a/nova/compute/rpcapi.py b/nova/compute/rpcapi.py
-index 0cd2668..6c4f90d 100644
+index 0cd2668..327ca16 100644
 --- a/nova/compute/rpcapi.py
 +++ b/nova/compute/rpcapi.py
-@@ -170,6 +170,12 @@ class ComputeAPI(nova.openstack.common.rpc.proxy.RpcProxy):
+@@ -170,6 +170,19 @@ class ComputeAPI(nova.openstack.common.rpc.proxy.RpcProxy):
                  instance=instance_p, network_id=network_id),
                  topic=_compute_topic(self.topic, ctxt, None, instance))
  
-+    def attach_nbs_volume(self, ctxt, instance, volume_id, mountpoint):
++    def extend_nbs_volume(self, ctxt, instance, device=None):
++        instance_p = jsonutils.to_primitive(instance)
++        self.cast(ctxt, self.make_msg('extend_nbs_volume',
++                instance=instance_p, volume_id=volume_id,
++                size=size, device=device),
++                topic=_compute_topic(self.topic, ctxt, None, instance))
++
++    def attach_nbs_volume(self, ctxt, instance, volume_id, device):
 +        instance_p = jsonutils.to_primitive(instance)
 +        self.cast(ctxt, self.make_msg('attach_nbs_volume',
 +                instance=instance_p, volume_id=volume_id, device=device),
@@ -534,7 +644,7 @@ index 0cd2668..6c4f90d 100644
      def attach_volume(self, ctxt, instance, volume_id, mountpoint):
          instance_p = jsonutils.to_primitive(instance)
          self.cast(ctxt, self.make_msg('attach_volume',
-@@ -210,6 +216,12 @@ class ComputeAPI(nova.openstack.common.rpc.proxy.RpcProxy):
+@@ -210,6 +223,12 @@ class ComputeAPI(nova.openstack.common.rpc.proxy.RpcProxy):
                  reservations=reservations),
                  topic=_compute_topic(self.topic, ctxt, host, instance))
  
@@ -547,7 +657,7 @@ index 0cd2668..6c4f90d 100644
      def detach_volume(self, ctxt, instance, volume_id):
          instance_p = jsonutils.to_primitive(instance)
          self.cast(ctxt, self.make_msg('detach_volume',
-@@ -458,6 +470,12 @@ class ComputeAPI(nova.openstack.common.rpc.proxy.RpcProxy):
+@@ -458,6 +477,12 @@ class ComputeAPI(nova.openstack.common.rpc.proxy.RpcProxy):
          topic = _compute_topic(self.topic, ctxt, host, None)
          return self.call(ctxt, self.make_msg('get_host_uptime'), topic)
  
@@ -608,11 +718,39 @@ index c0112ce..934f1b5 100644
  global_opts = [
      cfg.StrOpt('my_ip',
                 default=_get_my_ip(),
+diff --git a/nova/virt/driver.py b/nova/virt/driver.py
+index 8be6ff7..293c150 100644
+--- a/nova/virt/driver.py
++++ b/nova/virt/driver.py
+@@ -233,10 +233,23 @@ class ComputeDriver(object):
+         # TODO(Vek): Need to pass context in for access to auth_token
+         raise NotImplementedError()
+ 
++    def extend_nbs_volume(self, instance_name, device, size):
++        """Attach the disk to the instance at mountpoint using info"""
++        raise NotImplementedError()
++
++    def attach_nbs_volume(self, instance_name, device, host_dev,
++                          qos_info, volume_id):
++        """Attach the disk to the instance at mountpoint using info"""
++        raise NotImplementedError()
++
+     def attach_volume(self, connection_info, instance_name, mountpoint):
+         """Attach the disk to the instance at mountpoint using info"""
+         raise NotImplementedError()
+ 
++    def detach_nbs_volume(self, instance_name, mountpoint):
++        """Detach the disk attached to the instance"""
++        raise NotImplementedError()
++
+     def detach_volume(self, connection_info, instance_name, mountpoint):
+         """Detach the disk attached to the instance"""
+         raise NotImplementedError()
 diff --git a/nova/virt/libvirt/driver.py b/nova/virt/libvirt/driver.py
-index 5bd7529..625fbe1 100644
+index 5bd7529..89164e0 100644
 --- a/nova/virt/libvirt/driver.py
 +++ b/nova/virt/libvirt/driver.py
-@@ -734,6 +734,120 @@ class LibvirtDriver(driver.ComputeDriver):
+@@ -734,6 +734,137 @@ class LibvirtDriver(driver.ComputeDriver):
          method = getattr(driver, method_name)
          return method(connection_info, *args, **kwargs)
  
@@ -677,6 +815,23 @@ index 5bd7529..625fbe1 100644
 +                'slot': free_slot}
 +
 +    @exception.wrap_exception()
++    def extend_nbs_volume(self, instance_name, device, size):
++        """ """
++        if FLAGS.libvirt_type == 'lxc':
++            LOG.error(_("LXC hypervisor is not supported to attach volume."))
++            raise notsupported
++
++        mount_device = device['mountpoint'].rpartition("/")[2]
++        virt_dom = self._lookup_by_name(instance_name)
++        try:
++            state = LIBVIRT_POWER_STATE[virt_dom.info()[0]]
++            if state == power_state.RUNNING:
++                size_KB = size * 1024 * 1024
++                virt_dom.blockResize(mount_device, size_KB, 0)
++        except CCCXXX:
++            raise XXX
++
++    @exception.wrap_exception()
 +    def attach_nbs_volume(self, instance_name, device, host_dev,
 +                          qos_info, volume_id):
 +        """
@@ -733,7 +888,7 @@ index 5bd7529..625fbe1 100644
      @exception.wrap_exception()
      def attach_volume(self, connection_info, instance_name, mountpoint):
          virt_dom = self._lookup_by_name(instance_name)
-@@ -792,6 +906,38 @@ class LibvirtDriver(driver.ComputeDriver):
+@@ -792,6 +923,38 @@ class LibvirtDriver(driver.ComputeDriver):
          return xml
  
      @exception.wrap_exception()
