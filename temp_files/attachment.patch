@@ -1,4 +1,4 @@
-commit c65c07203d0516e9c227532c23cb53e3f98a0cca
+commit 0a4e441ec8ac6295226ce25e762a8a8c875951ef
 Author: Wangpan <hzwangpan@corp.netease.com>
 Date:   Thu May 16 17:59:56 2013 +0800
 
@@ -11,6 +11,19 @@ Date:   Thu May 16 17:59:56 2013 +0800
     
     Change-Id: Ia9f003f498a3748028ce89879d6eaf5685bcad94
 
+diff --git a/etc/nova/policy.json b/etc/nova/policy.json
+index 6ab4160..6f6e4ed 100644
+--- a/etc/nova/policy.json
++++ b/etc/nova/policy.json
+@@ -7,6 +7,8 @@
+     "compute:create": [],
+     "compute:create:attach_network": [],
+     "compute:create:attach_volume": [],
++    "compute:create:attach_nbs_volume": [],
++    "compute:create:detach_nbs_volume": [],
+     "compute:create:forced_host": [["is_admin:True"]],
+     "compute:get_all": [],
+ 
 diff --git a/nova/api/openstack/compute/contrib/server_status.py b/nova/api/openstack/compute/contrib/server_status.py
 index d9368a4..175230e 100644
 --- a/nova/api/openstack/compute/contrib/server_status.py
@@ -113,18 +126,27 @@ index d9368a4..175230e 100644
  class Server_status(extensions.ExtensionDescriptor):
      """Add server_status to the Create Server v1.1 API"""
 diff --git a/nova/api/openstack/compute/contrib/volumes.py b/nova/api/openstack/compute/contrib/volumes.py
-index 9940e30..03a6eef 100644
+index 9940e30..5a53e46 100644
 --- a/nova/api/openstack/compute/contrib/volumes.py
 +++ b/nova/api/openstack/compute/contrib/volumes.py
-@@ -15,6 +15,7 @@
+@@ -15,6 +15,8 @@
  
  """The volumes extension."""
  
++import datetime
 +import time
  import webob
  from webob import exc
  from xml.dom import minidom
-@@ -164,6 +165,7 @@ class VolumeController(wsgi.Controller):
+@@ -27,6 +29,7 @@ from nova import compute
+ from nova import exception
+ from nova import flags
+ from nova.openstack.common import log as logging
++from nova.openstack.common import timeutils
+ from nova import utils
+ from nova import volume
+ from nova.volume import volume_types
+@@ -164,6 +167,7 @@ class VolumeController(wsgi.Controller):
      """The Volumes API controller for the OpenStack API."""
  
      def __init__(self):
@@ -132,7 +154,7 @@ index 9940e30..03a6eef 100644
          self.volume_api = volume.API()
          super(VolumeController, self).__init__()
  
-@@ -271,6 +273,55 @@ class VolumeController(wsgi.Controller):
+@@ -271,6 +275,55 @@ class VolumeController(wsgi.Controller):
  
          return wsgi.ResponseObject(result, headers=dict(location=location))
  
@@ -188,7 +210,7 @@ index 9940e30..03a6eef 100644
  
  def _translate_attachment_detail_view(volume_id, instance_uuid, mountpoint):
      """Maps keys for attachment details view."""
-@@ -375,9 +426,66 @@ class VolumeAttachmentController(wsgi.Controller):
+@@ -375,9 +428,66 @@ class VolumeAttachmentController(wsgi.Controller):
              instance['uuid'],
              assigned_mountpoint)}
  
@@ -255,7 +277,7 @@ index 9940e30..03a6eef 100644
          context = req.environ['nova.context']
          authorize(context)
  
-@@ -420,8 +528,46 @@ class VolumeAttachmentController(wsgi.Controller):
+@@ -420,8 +530,56 @@ class VolumeAttachmentController(wsgi.Controller):
          """Update a volume attachment.  We don't currently support this."""
          raise exc.HTTPBadRequest()
  
@@ -281,13 +303,23 @@ index 9940e30..03a6eef 100644
 +            raise exc.HTTPNotFound()
 +
 +        found = False
++        too_short_interval = False
 +        for bdm in bdms:
 +            if bdm['volume_id'] == volume_id:
++                # FIXME(wangpan): we check the update time of device here
++                #                 to avoid attaching/detaching too frequently
++                #                 (vm may get exception if do that).
++                if ((timeutils.utcnow() - bdm['updated_at'])
++                        < datetime.timedelta(seconds=10)):
++                    too_short_interval = True
++                    break
 +                self.compute_api.detach_nbs_volume(context,
 +                    instance, volume_id)
 +                found = True
 +                break
 +
++        if too_short_interval:
++            raise Forbidden()
 +        if not found:
 +            raise exc.HTTPNotFound()
 +        else:
@@ -303,10 +335,10 @@ index 9940e30..03a6eef 100644
          authorize(context)
  
 diff --git a/nova/compute/api.py b/nova/compute/api.py
-index bd417fe..b6a6d67 100644
+index bd417fe..fc61054 100644
 --- a/nova/compute/api.py
 +++ b/nova/compute/api.py
-@@ -22,12 +22,15 @@
+@@ -22,14 +22,18 @@
  networking and storage of VMs, and compute hosts on which they run)."""
  
  import base64
@@ -321,8 +353,11 @@ index bd417fe..b6a6d67 100644
 +
  from nova import block_device
  from nova.compute import instance_types
++from nova.compute import nbs_client
  from nova.compute import power_state
-@@ -63,6 +66,7 @@ flags.DECLARE('consoleauth_topic', 'nova.consoleauth')
+ from nova.compute import rpcapi as compute_rpcapi
+ from nova.compute import task_states
+@@ -63,6 +67,7 @@ flags.DECLARE('consoleauth_topic', 'nova.consoleauth')
  
  MAX_USERDATA_SIZE = 65535
  QUOTAS = quota.QUOTAS
@@ -330,7 +365,15 @@ index bd417fe..b6a6d67 100644
  
  
  def check_instance_state(vm_state=None, task_state=(None,)):
-@@ -2104,6 +2108,87 @@ class API(base.Base):
+@@ -146,6 +151,7 @@ class API(base.Base):
+ 
+         self.network_api = network_api or network.API()
+         self.volume_api = volume_api or volume.API()
++        self.nbs_api = nbs_client.API()
+         self.security_group_api = security_group_api or SecurityGroupAPI()
+         self.sgh = importutils.import_object(FLAGS.security_group_handler)
+         self.consoleauth_rpcapi = consoleauth_rpcapi.ConsoleAuthAPI()
+@@ -2104,6 +2110,92 @@ class API(base.Base):
          """Inject network info for the instance."""
          self.compute_rpcapi.inject_network_info(context, instance=instance)
  
@@ -370,28 +413,13 @@ index bd417fe..b6a6d67 100644
 +        return {'instance_uuid': instance_uuid,
 +                'status': status}
 +
-+    @wrap_check_policy#####
-+    @check_instance_lock
-+    def check_nbs_attached(self, context, volume_id):
-+        """ """
-+        # call nbs to get the volume info
-+        try:
-+            volume = self.nbs_client.get(context, volume_id)
-+        except notfound:
-+            raise notfound
-+        if volume['status'] != "attachedVM":
-+            return volume['instanceId']
-+        else:
-+            return None
-+
-+    @wrap_check_policy#####
 +    @check_instance_lock
 +    def extend_nbs_volume(self, context, instance, volume_id, size):
 +        """ """
 +        self.compute_rpcapi.extend_nbs_volume(context, instance=instance,
 +                    volume_id=volume_id, size=size, device=None)
 +
-+    @wrap_check_policy#####
++    @wrap_check_policy
 +    @check_instance_lock
 +    def attach_nbs_volume(self, context, instance, volume_id):
 +        """Attach an existing volume to an existing instance."""
@@ -400,31 +428,51 @@ index bd417fe..b6a6d67 100644
 +        #             the same time. When db access is removed from
 +        #             compute, the bdm will be created here and we will
 +        #             have to make sure that they are assigned atomically.
++
++        # Check volume exists and is available to attach
++        volume = self.nbs_api.get(context, volume_id)
++        if volume.get('volume', None) is None:
++            raise exception.VolumeNotFound(volume_id=volume_id)
++        if volume['status'] != "available":
++            reason = _("Volume %s is not available") % volume_id
++            raise exception.InvalidVolume(reason=reason)
++
 +        device = self.compute_rpcapi.get_device_for_nbs_volume(
 +                        context, instance=instance)
 +        if device is None:
 +            # can't find a slot or target dev to attach
-+            raise xxxxx
-+        #try:
-+            self.compute_rpcapi.attach_nbs_volume(context, instance=instance,
-+                    volume_id=volume_id, device=device)
-+        #except Exception:
-+        #    with excutils.save_and_reraise_exception():
-+        #        self.db.block_device_mapping_destroy_by_instance_and_device(
-+        #                context, instance['uuid'], device)
++            LOG.error(_("Cannot find a free slot or target dev to attach"))
++            raise exception.NoFreeDevice()
++
++        # deal with race condition here,
++        # such as attaching a volume two times at a short interval
++        db_vol = self.db.block_device_mapping_get_all_by_volume(context,
++                                                                volume_id)
++        if len(db_vol) > 0:
++            self.db.block_device_mapping_destroy_by_instance_and_device(
++                        context, instance['uuid'], device)
++            reason = _("Volume %s is in use") % volume_id
++            raise exception.InvalidVolume(reason=reason)
++        else:
++            values = {'instance_uuid': instance['uuid'],
++                      'device_name': jsonutils.dumps(device),
++                      'volume_id': volume_id}
++            self.db.block_device_mapping_update_or_create(context, values)
++        self.compute_rpcapi.attach_nbs_volume(context, instance=instance,
++                volume_id=volume_id, device=device)
 +
 +        return device['real_path']
 +
      @wrap_check_policy
      @check_instance_lock
      def attach_volume(self, context, instance, volume_id, device=None):
-@@ -2135,6 +2220,22 @@ class API(base.Base):
+@@ -2135,6 +2227,22 @@ class API(base.Base):
          return device
  
      @check_instance_lock
 +    def detach_nbs_volume(self, context, instance, volume_id):
 +        """Detach a volume from an instance."""
-+        volume = self.nbs_client.get(context, volume_id)
++        volume = self.nbs_api.get(context, volume_id)
 +        # FIXME(wangpan): how to deal with 'attached'?
 +        if volume['status'] != 'attachedVM':
 +            msg = _("Volume must be attached in order to detach.")
@@ -433,7 +481,7 @@ index bd417fe..b6a6d67 100644
 +        if volume['instance_uuid'] != instance['uuid']:
 +            raise exception.VolumeUnattached(volume_id=volume_id)
 +
-+        check_policy(context, 'detach_volume', instance)
++        check_policy(context, 'detach_nbs_volume', instance)
 +        self.compute_rpcapi.detach_nbs_volume(context, instance=instance,
 +                volume_id=volume_id)
 +
@@ -442,10 +490,73 @@ index bd417fe..b6a6d67 100644
          check_policy(context, 'detach_volume', instance)
  
 diff --git a/nova/compute/manager.py b/nova/compute/manager.py
-index e863e73..d33ff77 100644
+index e863e73..c5c6c96 100644
 --- a/nova/compute/manager.py
 +++ b/nova/compute/manager.py
-@@ -2878,6 +2878,23 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -52,6 +52,7 @@ from nova import block_device
+ from nova import compute
+ from nova.compute import ebs_client
+ from nova.compute import instance_types
++from nova.compute import nbs_client
+ from nova.compute import power_state
+ from nova.compute import resource_tracker
+ from nova.compute import rpcapi as compute_rpcapi
+@@ -357,6 +358,7 @@ class ComputeManager(manager.SchedulerDependentManager):
+         self.network_api = network.API()
+         self.volume_api = volume.API()
+         self.ebs_api = ebs_client.API()
++        self.nbs_api = nbs_client.API()
+         self._last_host_check = 0
+         self._last_bw_usage_poll = 0
+         self._last_info_cache_heal = 0
+@@ -466,6 +468,38 @@ class ComputeManager(manager.SchedulerDependentManager):
+         else:
+             LOG.warning(_('get instance storage device for ioqos failed!'))
+ 
++    def _check_and_wait_nbs_vol(self, count, bdms):
++        """
++        Check if nbs volumes disappeared, if that wait for nbs volumes appear.
++        """
++        factor = (count + 1) ** 2
++        wait_seconds = 0
++        disappeared_host_devs = []
++
++        for bdm in bdms:
++            host_dev = jsonutils.loads(bdm['connect_info']).get('host_dev')
++            if host_dev is not None and not os.path.exists(host_dev):
++                disappeared_host_devs.append(host_dev)
++
++        if len(disappeared_host_devs) == 0:
++            return
++
++        wait_seconds = FLAGS.nbs_boot_wait_timeout / factor
++        if wait_seconds == 0:
++            return
++
++        start = time.time()
++        while len(disappeared_host_devs) > 0:
++            LOG.info(_("Wait for nbs volume %s 3 seconds") % host_dev)
++            # FIXME(wangpan): sticked in 3s here.
++            time.sleep(3)
++            disappeared_host_devs = [host_dev for host_dev in
++                        disappeared_host_devs if not os.path.exists(host_dev)]
++            if time.time() - start >= wait_seconds:
++                break
++        if len(disappeared_host_devs) > 0:
++            LOG.warning(_("Nbs volume disappeared %s") % disappeared_host_devs)
++
+     def init_host(self):
+         """Initialization for a standalone compute service."""
+         self.driver.init_host(host=self.host)
+@@ -517,6 +551,7 @@ class ComputeManager(manager.SchedulerDependentManager):
+                     block_device_info = \
+                         self._get_instance_volume_block_device_info(
+                             context, instance['uuid'])
++                    self._check_and_wait_nbs_vol(count, block_device_info)
+ 
+                     try:
+                         self.driver.resume_state_on_host_boot(
+@@ -2878,6 +2913,23 @@ class ComputeManager(manager.SchedulerDependentManager):
      @exception.wrap_exception(notifier=notifier, publisher_id=publisher_id())
      @reverts_task_state
      @wrap_instance_fault
@@ -469,10 +580,26 @@ index e863e73..d33ff77 100644
      def reserve_block_device_name(self, context, instance, device):
  
          @utils.synchronized(instance['uuid'])
-@@ -2895,6 +2912,125 @@ class ComputeManager(manager.SchedulerDependentManager):
-     @exception.wrap_exception(notifier=notifier, publisher_id=publisher_id())
-     @reverts_task_state
-     @wrap_instance_fault
+@@ -2892,6 +2944,152 @@ class ComputeManager(manager.SchedulerDependentManager):
+             return result
+         return do_reserve()
+ 
++    def _get_host_ip_by_ifname(self, ifname):
++        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
++        try:
++            import fcntl
++            ip = socket.inet_ntoa(fcntl.ioctl(
++                                              s.fileno(),
++                                              0x8915,  # SIOCGIFADDR
++                                              struct.pack('256s', ifname[:15])
++                                              )[20:24])
++            return ip
++        except Exception:
++            return None
++
++    @exception.wrap_exception(notifier=notifier, publisher_id=publisher_id())
++    @reverts_task_state
++    @wrap_instance_fault
 +    def extend_nbs_volume(self, context, instance, volume_id, size, device):
 +        """Extend a nbs volume which has been attached on an instance."""
 +        # Get attached device from nova db
@@ -501,7 +628,8 @@ index e863e73..d33ff77 100644
 +    @wrap_instance_fault
 +    def attach_nbs_volume(self, context, volume_id, device, instance):
 +        """Attach a nbs volume to an instance."""
-+        # TODO(wangpan): if this host can't attach nbs volume, raise exception
++        # TODO(wangpan): if this host is forbidden to attach nbs volume,
++        #                an exception needs to be raised.
 +        try:
 +            return self._attach_nbs_volume(context, volume_id,
 +                                           device, instance)
@@ -511,16 +639,26 @@ index e863e73..d33ff77 100644
 +                        context, instance.get('uuid'), jsonutils.dumps(device))
 +
 +    def _attach_nbs_volume(self, context, volume_id, device, instance):
-+        context = context.elevated()
++        # context = context.elevated()
 +        LOG.audit(_('Attaching nbs volume %(volume_id)s to %(device)s'),
 +                  locals(), context=context, instance=instance)
 +        try:
-+            # call nbs to attach volume to host
-+
++            # call nbs to attach volume to this host
++            host_ip = self._get_host_ip_by_ifname(FLAGS.host_ip_ifname)
++            result = self.nbs_api.attach(context, volume_id, host_ip)
++            if result is None:
++                raise NbsException()
 +            # check volume status, wait for nbs attaching finish
++            succ = self.nbs_api.wait_for_attached(context, volume_id)
++            if not succ:
++                raise NbsTimeout()
 +
 +            # get host dev path and QoS params from nbs
-+
++            result = self.nbs_api.get_host_dev_and_qos_info(context, volume_id)
++            if result is None:
++                raise NbsException()
++            host_dev = result['host_dev']
++            qos_info = result['qos_info']
 +        except Exception:  # pylint: disable=W0702
 +            with excutils.save_and_reraise_exception():
 +                msg = _("Failed to connect to volume %(volume_id)s "
@@ -531,12 +669,15 @@ index e863e73..d33ff77 100644
 +
 +        @utils.synchronized(instance['uuid'])
 +        def get_new_device(used_dev):
++            """
++            We get a new free slot and target dev by calling libvirt driver.
++            """
 +            result = self.driver.get_device_for_nbs_volume(instance['name'],
 +                                                           used_dev)
 +
 +            # NOTE(vish): create bdm here to avoid race condition
 +            values = {'instance_uuid': instance['uuid'],
-+                      'device_name': result}
++                      'device_name': jsonutils.dumps(result)}
 +            self.db.block_device_mapping_update_or_create(context, values)
 +            return result
 +
@@ -589,13 +730,10 @@ index e863e73..d33ff77 100644
 +            'no_device': None}
 +        self.db.block_device_mapping_update_or_create(context, values)
 +
-+    @exception.wrap_exception(notifier=notifier, publisher_id=publisher_id())
-+    @reverts_task_state
-+    @wrap_instance_fault
-     def attach_volume(self, context, volume_id, mountpoint, instance):
-         """Attach a volume to an instance."""
-         try:
-@@ -2956,6 +3092,35 @@ class ComputeManager(manager.SchedulerDependentManager):
+     @exception.wrap_exception(notifier=notifier, publisher_id=publisher_id())
+     @reverts_task_state
+     @wrap_instance_fault
+@@ -2956,6 +3154,39 @@ class ComputeManager(manager.SchedulerDependentManager):
              'no_device': None}
          self.db.block_device_mapping_update_or_create(context, values)
  
@@ -612,6 +750,10 @@ index e863e73..d33ff77 100644
 +        except Exception:  # pylint: disable=W0702
 +            msg = _("Faild to detach volume %(volume_id)s from %(mp)s")
 +            LOG.exception(msg % locals(), context=context, instance=instance)
++        else:
++            # FIXME(wangpan): we sleep 3s here to avoid attaching/detaching
++            #                 too frequently(vm may get exception if do that).
++            time.sleep(3)
 +
 +    @exception.wrap_exception(notifier=notifier, publisher_id=publisher_id())
 +    @reverts_task_state
@@ -622,7 +764,7 @@ index e863e73..d33ff77 100644
 +                                            volume_id)
 +        self._detach_nbs_volume(context, instance, bdm)
 +        # call nbs to detach volume from host
-+        self.nbs_client.detach(context, volume)
++        self.nbs_api.detach(context, volume)
 +        # check result and log it
 +        if succ:####?????always destroy bdm info
 +            self.db.block_device_mapping_destroy_by_instance_and_volume(
@@ -633,10 +775,10 @@ index e863e73..d33ff77 100644
          mp = bdm['device_name']
 diff --git a/nova/compute/nbs_client.py b/nova/compute/nbs_client.py
 new file mode 100644
-index 0000000..ed8c8da
+index 0000000..8ac7d36
 --- /dev/null
 +++ b/nova/compute/nbs_client.py
-@@ -0,0 +1,219 @@
+@@ -0,0 +1,234 @@
 +# author: hzwangpan@corp.netease.com
 +# client of EBS API for nova to check and detach all volume(s) when VM is
 +# going to shutdown, make sure the volume status in EBS is identical with
@@ -687,6 +829,11 @@ index 0000000..ed8c8da
 +                        context=context)
 +            return None
 +
++        if not host_ip:
++            LOG.warn(_("host ip is None, do nothing and return now"),
++                        context=context)
++            return None
++
 +        project_id = context.project_id
 +        url = "/" + FLAGS.nbs_prefix_url + "/?Action=AttachVolume" \
 +              + "&ProjectId=" + str(project_id) \
@@ -700,6 +847,11 @@ index 0000000..ed8c8da
 +    def detach(self, context, volume_id, host_ip):
 +        if not volume_id:
 +            LOG.warn(_("volume id is None, do nothing and return now"),
++                        context=context)
++            return None
++
++        if not host_ip:
++            LOG.warn(_("host ip is None, do nothing and return now"),
 +                        context=context)
 +            return None
 +
@@ -750,7 +902,7 @@ index 0000000..ed8c8da
 +                    "times: %d") % (check_interval, times), context=context)
 +            time.sleep(check_interval)
 +            times += 1
-+        LOG.warn(_("volume %s can't be attached successfully after %ds") %
++        LOG.warn(_("volume %s can not be attached successfully after %ds") %
 +                 (volume_id, FLAGS.nbs_attach_wait_timeout), context=context)
 +        return False
 +
@@ -777,6 +929,10 @@ index 0000000..ed8c8da
 +        LOG.warn(_("volume %s can't be extended successfully after %ds") %
 +                 (volume_id, FLAGS.nbs_extend_wait_timeout), context=context)
 +        return False
++
++    def get_host_dev_and_qos_info(context, volume_id):
++        """
++        """
 +
 +    def _request(self, context, method, url, params, headers):
 +        if not self._nbs_api_server:
@@ -807,6 +963,7 @@ index 0000000..ed8c8da
 +        except Exception, ex:
 +            LOG.error(_("exception occurs when connect to nbs server, "
 +                        "error msg: %s") % str(ex), context=context)
++            self._notify_NBS_connection_failure(context, self._nbs_api_server)
 +            return None
 +
 +        try:
@@ -918,8 +1075,55 @@ index a8a0a65..f331510 100644
  def get_device_name_for_instance(context, instance, device):
      """Validates (or generates) a device name for instance.
  
+diff --git a/nova/db/api.py b/nova/db/api.py
+index 68b3cf2..c2056cd 100644
+--- a/nova/db/api.py
++++ b/nova/db/api.py
+@@ -1323,6 +1323,10 @@ def block_device_mapping_get_all_by_instance(context, instance_uuid):
+     return IMPL.block_device_mapping_get_all_by_instance(context,
+                                                          instance_uuid)
+ 
++def block_device_mapping_get_all_by_volume(context, volume_id):
++    """Get all block device mapping by volume"""
++    return IMPL.block_device_mapping_get_all_by_instance(context, volume_id)
++
+ 
+ def block_device_mapping_destroy(context, bdm_id):
+     """Destroy the block device mapping."""
+diff --git a/nova/db/sqlalchemy/api.py b/nova/db/sqlalchemy/api.py
+index fef3f99..59fd96d 100644
+--- a/nova/db/sqlalchemy/api.py
++++ b/nova/db/sqlalchemy/api.py
+@@ -3741,6 +3741,12 @@ def block_device_mapping_get_all_by_instance(context, instance_uuid):
+                  filter_by(instance_uuid=instance_uuid).\
+                  all()
+ 
++@require_context
++def block_device_mapping_get_all_by_volume(context, volume_id):
++    return _block_device_mapping_get_query(context).\
++                 filter_by(instance_uuid=volume_id).\
++                 all()
++
+ 
+ @require_context
+ def block_device_mapping_destroy(context, bdm_id):
+diff --git a/nova/exception.py b/nova/exception.py
+index 2c3e7bb..02aac5f 100644
+--- a/nova/exception.py
++++ b/nova/exception.py
+@@ -378,6 +378,10 @@ class DevicePathInUse(Invalid):
+     message = _("The supplied device path (%(path)s) is in use.")
+ 
+ 
++class NoFreeDevice(Invalid):
++    message = _("Cannot find a free device to attach nbs volume.")
++
++
+ class DeviceIsBusy(Invalid):
+     message = _("The supplied device (%(device)s) is busy.")
+ 
 diff --git a/nova/flags.py b/nova/flags.py
-index c0112ce..cfc876a 100644
+index c0112ce..61bf8a5 100644
 --- a/nova/flags.py
 +++ b/nova/flags.py
 @@ -230,6 +230,37 @@ resize_opts = [
@@ -941,7 +1145,7 @@ index c0112ce..cfc876a 100644
 +               default='br100',
 +               help='network device to get intranet ip address for nbs'),
 +    cfg.IntOpt('nbs_boot_wait_timeout',
-+               default=300,
++               default=120,
 +               help='nbs volume wait timeout during init host(in second)'),
 +    cfg.IntOpt('nbs_attach_wait_timeout',
 +               default=30,
