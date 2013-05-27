@@ -1,4 +1,4 @@
-commit 87862e0c67cc00aca4018f01e0aa05720acbfeb7
+commit d7787fdd4063e2acbe10fc78ae65f8fd34ad2bb4
 Author: Wangpan <hzwangpan@corp.netease.com>
 Date:   Thu May 16 17:59:56 2013 +0800
 
@@ -126,7 +126,7 @@ index d9368a4..175230e 100644
  class Server_status(extensions.ExtensionDescriptor):
      """Add server_status to the Create Server v1.1 API"""
 diff --git a/nova/api/openstack/compute/contrib/volumes.py b/nova/api/openstack/compute/contrib/volumes.py
-index 9940e30..8d5b41d 100644
+index 9940e30..72ae487 100644
 --- a/nova/api/openstack/compute/contrib/volumes.py
 +++ b/nova/api/openstack/compute/contrib/volumes.py
 @@ -15,6 +15,8 @@
@@ -202,7 +202,7 @@ index 9940e30..8d5b41d 100644
 +            # call nbs to extend this volume directly
 +            self.compute_api.extend_nbs_volume(context, id, size)
 +
-+        return {}
++        return {'requestId': context.request_id, 'size': size}
 +
 +    # @wsgi.serializers(xml=VolumesTemplate)
 +    def update(self, req, id, body):
@@ -260,8 +260,8 @@ index 9940e30..8d5b41d 100644
 +        attachment['requestId'] = context.request_id
 +        attachment['instanceId'] = instance['uuid']
 +        attachment['volumeId'] = volume_id
-+        attachment['device'] = device
-+        attachment['status'] = 0
++        attachment['device'] = device['real_path']
++        attachment['status'] = "attaching"
 +        attachment['attachTime'] = long(time.time())
 +
 +        # NOTE(justinsb): And now, we have a problem...
@@ -285,7 +285,7 @@ index 9940e30..8d5b41d 100644
          context = req.environ['nova.context']
          authorize(context)
  
-@@ -420,8 +538,61 @@ class VolumeAttachmentController(wsgi.Controller):
+@@ -420,8 +538,66 @@ class VolumeAttachmentController(wsgi.Controller):
          """Update a volume attachment.  We don't currently support this."""
          raise exc.HTTPBadRequest()
  
@@ -323,8 +323,6 @@ index 9940e30..8d5b41d 100644
 +                    < datetime.timedelta(seconds=FLAGS.attch_detach_interval)):
 +                    too_short_interval = True
 +                    break
-+                self.compute_api.detach_nbs_volume(context,
-+                    instance, volume_id)
 +                found = True
 +                break
 +
@@ -336,7 +334,14 @@ index 9940e30..8d5b41d 100644
 +            explanation = _("volume %s is not attached.") % volume_id
 +            raise exc.HTTPNotFound(explanation=explanation)
 +        else:
-+            return webob.Response(status_int=202)
++            try:
++                self.compute_api.detach_nbs_volume(context,
++                        instance, volume_id)
++            except exception.Invalid:
++                explanation = _("volume %s is not attached.") % volume_id
++                raise exc.HTTPNotFound(explanation=explanation)
++            else:
++                return {'requestId': context.request_id, 'return': true}
 +
      def delete(self, req, server_id, id):
          """Detach a volume from an instance."""
@@ -522,7 +527,7 @@ index bd417fe..b071918 100644
          check_policy(context, 'detach_volume', instance)
  
 diff --git a/nova/compute/manager.py b/nova/compute/manager.py
-index e863e73..3c9acb7 100644
+index e863e73..8fb23e1 100644
 --- a/nova/compute/manager.py
 +++ b/nova/compute/manager.py
 @@ -52,6 +52,7 @@ from nova import block_device
@@ -806,7 +811,7 @@ index e863e73..3c9acb7 100644
 +        mp = jsonutils.loads(bdm['device_name'])['mountpoint']
 +        volume_id = bdm['volume_id']
 +
-+        LOG.audit(_('Detach volume %(volume_id)s from mountpoint %(mp)s'),
++        LOG.audit(_('Detach nbs volume %(volume_id)s from mountpoint %(mp)s'),
 +                  locals(), context=context, instance=instance)
 +
 +        try:
