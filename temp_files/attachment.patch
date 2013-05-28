@@ -1,4 +1,4 @@
-commit d7787fdd4063e2acbe10fc78ae65f8fd34ad2bb4
+commit e2949df78a813c3a2890086c8accf1d4752337cd
 Author: Wangpan <hzwangpan@corp.netease.com>
 Date:   Thu May 16 17:59:56 2013 +0800
 
@@ -8,6 +8,8 @@ Date:   Thu May 16 17:59:56 2013 +0800
     2. add nbs volume detachment process
     3. add nbs volume extension process
     4. add nbs_client.py
+    5. handle db.block_device*
+    6. handle iotune and slot in block_device to_xml
     
     Change-Id: Ia9f003f498a3748028ce89879d6eaf5685bcad94
 
@@ -527,7 +529,7 @@ index bd417fe..b071918 100644
          check_policy(context, 'detach_volume', instance)
  
 diff --git a/nova/compute/manager.py b/nova/compute/manager.py
-index e863e73..8fb23e1 100644
+index e863e73..fb082ff 100644
 --- a/nova/compute/manager.py
 +++ b/nova/compute/manager.py
 @@ -52,6 +52,7 @@ from nova import block_device
@@ -546,16 +548,16 @@ index e863e73..8fb23e1 100644
          self._last_host_check = 0
          self._last_bw_usage_poll = 0
          self._last_info_cache_heal = 0
-@@ -466,6 +468,38 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -466,6 +468,47 @@ class ComputeManager(manager.SchedulerDependentManager):
          else:
              LOG.warning(_('get instance storage device for ioqos failed!'))
  
-+    def _check_and_wait_nbs_vol(self, count, bdms):
++    def _check_and_wait_nbs_vol(self, context, instance_uuid):
 +        """
 +        Check if nbs volumes disappeared, if that wait for nbs volumes appear.
 +        """
-+        factor = (count + 1) ** 2
-+        wait_seconds = 0
++        bdms = self.db.block_device_mapping_get_all_by_instance(context,
++                        instance_uuid, True)
 +        disappeared_host_devs = []
 +
 +        for bdm in bdms:
@@ -564,11 +566,7 @@ index e863e73..8fb23e1 100644
 +                disappeared_host_devs.append(host_dev)
 +
 +        if len(disappeared_host_devs) == 0:
-+            return
-+
-+        wait_seconds = FLAGS.nbs_boot_wait_timeout / factor
-+        if wait_seconds == 0:
-+            return
++            return {}
 +
 +        start = time.time()
 +        while len(disappeared_host_devs) > 0:
@@ -577,23 +575,38 @@ index e863e73..8fb23e1 100644
 +            time.sleep(3)
 +            disappeared_host_devs = [host_dev for host_dev in
 +                        disappeared_host_devs if not os.path.exists(host_dev)]
-+            if time.time() - start >= wait_seconds:
++            if time.time() - start >= FLAGS.nbs_boot_wait_timeout:
 +                break
 +        if len(disappeared_host_devs) > 0:
-+            LOG.warning(_("Nbs volume disappeared %s") % disappeared_host_devs)
++            LOG.warning(_("Nbs volume disappeared %s which is used by %s")
++                        % (disappeared_host_devs, instance_uuid))
++
++        block_device_mapping = []
++        for bdm in bdms:
++            cinfo = jsonutils.loads(bdm['connection_info'])
++            mp = jsonutils.loads(bdm['device_name']).get('mountpoint', None)
++            bdmap = {'host_dev': cinfo.get('host_dev', None),
++                     'qos_info': cinfo.get('qos_info', None),
++                     'mount_device': mp,
++                     'serial': bdm.get('volume_id', None)}
++            block_device_mapping.append(bdmap)
++
++        return {'block_device_mapping': block_device_mapping}
 +
      def init_host(self):
          """Initialization for a standalone compute service."""
          self.driver.init_host(host=self.host)
-@@ -517,6 +551,7 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -517,6 +560,9 @@ class ComputeManager(manager.SchedulerDependentManager):
                      block_device_info = \
                          self._get_instance_volume_block_device_info(
                              context, instance['uuid'])
-+                    self._check_and_wait_nbs_vol(count, block_device_info)
++                    if FLAGS.ebs_backend == 'nbs':
++                        block_device_info = self._check_and_wait_nbs_vol(
++                                                    context, instance['uuid'])
  
                      try:
                          self.driver.resume_state_on_host_boot(
-@@ -2878,6 +2913,23 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -2878,6 +2924,23 @@ class ComputeManager(manager.SchedulerDependentManager):
      @exception.wrap_exception(notifier=notifier, publisher_id=publisher_id())
      @reverts_task_state
      @wrap_instance_fault
@@ -617,7 +630,7 @@ index e863e73..8fb23e1 100644
      def reserve_block_device_name(self, context, instance, device):
  
          @utils.synchronized(instance['uuid'])
-@@ -2892,6 +2944,184 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -2892,6 +2955,185 @@ class ComputeManager(manager.SchedulerDependentManager):
              return result
          return do_reserve()
  
@@ -703,7 +716,8 @@ index e863e73..8fb23e1 100644
 +        try:
 +            # call nbs to attach volume to this host
 +            host_ip = self._get_host_ip_by_ifname(FLAGS.host_ip_ifname)
-+            result = self.nbs_api.attach(context, volume_id, host_ip)
++            result = self.nbs_api.attach(context, volume_id, instance['uuid'],
++                                        host_ip)
 +            if result is None:
 +                raise exception.NbsException()
 +
@@ -802,7 +816,7 @@ index e863e73..8fb23e1 100644
      @exception.wrap_exception(notifier=notifier, publisher_id=publisher_id())
      @reverts_task_state
      @wrap_instance_fault
-@@ -2956,6 +3186,47 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -2956,6 +3198,47 @@ class ComputeManager(manager.SchedulerDependentManager):
              'no_device': None}
          self.db.block_device_mapping_update_or_create(context, values)
  
@@ -852,10 +866,10 @@ index e863e73..8fb23e1 100644
          mp = bdm['device_name']
 diff --git a/nova/compute/nbs_client.py b/nova/compute/nbs_client.py
 new file mode 100644
-index 0000000..3b86584
+index 0000000..3a78534
 --- /dev/null
 +++ b/nova/compute/nbs_client.py
-@@ -0,0 +1,320 @@
+@@ -0,0 +1,326 @@
 +# author: hzwangpan@corp.netease.com
 +# client of Nbs API for nova to check and detach all volume(s) when VM is
 +# going to shutdown, make sure the volume status in Nbs is identical with
@@ -900,10 +914,15 @@ index 0000000..3b86584
 +        method = "GET"
 +        return self._request(context, method, url, params, headers)
 +
-+    def attach(self, context, volume_id, host_ip):
++    def attach(self, context, volume_id, instance_uuid, host_ip):
 +        if not volume_id:
 +            LOG.warn(_("volume id should be given, do nothing and return now"),
 +                        context=context)
++            return None
++
++        if not instance_uuid:
++            LOG.warn(_("instance uuid should be given, do nothing "
++                        "and return now"), context=context)
 +            return None
 +
 +        if not host_ip:
@@ -915,6 +934,7 @@ index 0000000..3b86584
 +        url = ("/" + FLAGS.nbs_prefix_url + "/?Action=AttachVolume"
 +                + "&ProjectId=" + str(project_id)
 +                + "&VolumeId=" + str(volume_id)
++                + "&InstanceId=" + str(instance_uuid)
 +                + "&HostIp=" + str(host_ip))
 +        headers = {"Content-type": "application/json",
 +                   "Accept": "application/json"}
@@ -1239,37 +1259,165 @@ index a8a0a65..f331510 100644
      """Validates (or generates) a device name for instance.
  
 diff --git a/nova/db/api.py b/nova/db/api.py
-index 68b3cf2..c2056cd 100644
+index 68b3cf2..a307058 100644
 --- a/nova/db/api.py
 +++ b/nova/db/api.py
-@@ -1323,6 +1323,10 @@ def block_device_mapping_get_all_by_instance(context, instance_uuid):
+@@ -1302,45 +1302,52 @@ def snapshot_update(context, snapshot_id, values):
+ ####################
+ 
+ 
+-def block_device_mapping_create(context, values):
++def block_device_mapping_create(context, values, is_nbs=False):
+     """Create an entry of block device mapping"""
+-    return IMPL.block_device_mapping_create(context, values)
++    return IMPL.block_device_mapping_create(context, values, is_nbs)
+ 
+ 
+-def block_device_mapping_update(context, bdm_id, values):
++def block_device_mapping_update(context, bdm_id, values, is_nbs=False):
+     """Update an entry of block device mapping"""
+-    return IMPL.block_device_mapping_update(context, bdm_id, values)
++    return IMPL.block_device_mapping_update(context, bdm_id, values, is_nbs)
+ 
+ 
+-def block_device_mapping_update_or_create(context, values):
++def block_device_mapping_update_or_create(context, values, is_nbs=False):
+     """Update an entry of block device mapping.
+     If not existed, create a new entry"""
+-    return IMPL.block_device_mapping_update_or_create(context, values)
++    return IMPL.block_device_mapping_update_or_create(context, values, is_nbs)
+ 
+ 
+-def block_device_mapping_get_all_by_instance(context, instance_uuid):
++def block_device_mapping_get_all_by_instance(context, instance_uuid,
++                                                        is_nbs=False):
+     """Get all block device mapping belonging to an instance"""
      return IMPL.block_device_mapping_get_all_by_instance(context,
-                                                          instance_uuid)
+-                                                         instance_uuid)
++                                                         instance_uuid,
++                                                         is_nbs)
  
-+def block_device_mapping_get_all_by_volume(context, volume_id):
++def block_device_mapping_get_all_by_volume(context, volume_id, is_nbs=False):
 +    """Get all block device mapping by volume"""
-+    return IMPL.block_device_mapping_get_all_by_instance(context, volume_id)
-+
++    return IMPL.block_device_mapping_get_all_by_instance(context, volume_id,
++        is_nbs)
  
- def block_device_mapping_destroy(context, bdm_id):
+-def block_device_mapping_destroy(context, bdm_id):
++
++def block_device_mapping_destroy(context, bdm_id, is_nbs=False):
      """Destroy the block device mapping."""
+-    return IMPL.block_device_mapping_destroy(context, bdm_id)
++    return IMPL.block_device_mapping_destroy(context, bdm_id, is_nbs)
+ 
+ 
+ def block_device_mapping_destroy_by_instance_and_device(context, instance_uuid,
+-                                                        device_name):
++                                                    device_name, is_nbs=False):
+     """Destroy the block device mapping."""
+     return IMPL.block_device_mapping_destroy_by_instance_and_device(
+-        context, instance_uuid, device_name)
++        context, instance_uuid, device_name, is_nbs)
+ 
+ 
+ def block_device_mapping_destroy_by_instance_and_volume(context, instance_uuid,
+-                                                        volume_id):
++                                                        volume_id, is_nbs):
+     """Destroy the block device mapping."""
+     return IMPL.block_device_mapping_destroy_by_instance_and_volume(
+-        context, instance_uuid, volume_id)
++        context, instance_uuid, volume_id, is_nbs)
+ 
+ 
+ ####################
 diff --git a/nova/db/sqlalchemy/api.py b/nova/db/sqlalchemy/api.py
-index fef3f99..59fd96d 100644
+index fef3f99..b06bd51 100644
 --- a/nova/db/sqlalchemy/api.py
 +++ b/nova/db/sqlalchemy/api.py
-@@ -3741,6 +3741,12 @@ def block_device_mapping_get_all_by_instance(context, instance_uuid):
+@@ -3687,7 +3687,9 @@ def _block_device_mapping_get_query(context, session=None):
+ 
+ 
+ @require_context
+-def block_device_mapping_create(context, values):
++def block_device_mapping_create(context, values, is_nbs=False):
++    if not is_nbs:
++        return
+     bdm_ref = models.BlockDeviceMapping()
+     bdm_ref.update(values)
+ 
+@@ -3697,7 +3699,9 @@ def block_device_mapping_create(context, values):
+ 
+ 
+ @require_context
+-def block_device_mapping_update(context, bdm_id, values):
++def block_device_mapping_update(context, bdm_id, values, is_nbs=False):
++    if not is_nbs:
++        return
+     session = get_session()
+     with session.begin():
+         _block_device_mapping_get_query(context, session=session).\
+@@ -3706,7 +3710,9 @@ def block_device_mapping_update(context, bdm_id, values):
+ 
+ 
+ @require_context
+-def block_device_mapping_update_or_create(context, values):
++def block_device_mapping_update_or_create(context, values, is_nbs=False):
++    if not is_nbs:
++        return
+     session = get_session()
+     with session.begin():
+         result = _block_device_mapping_get_query(context, session=session).\
+@@ -3736,14 +3742,27 @@ def block_device_mapping_update_or_create(context, values):
+ 
+ 
+ @require_context
+-def block_device_mapping_get_all_by_instance(context, instance_uuid):
++def block_device_mapping_get_all_by_instance(context, instance_uuid,
++                                                        is_nbs=False):
++    if not is_nbs:
++        return []
+     return _block_device_mapping_get_query(context).\
                   filter_by(instance_uuid=instance_uuid).\
                   all()
  
 +@require_context
-+def block_device_mapping_get_all_by_volume(context, volume_id):
++def block_device_mapping_get_all_by_volume(context, volume_id, is_nbs=False):
++    if not is_nbs:
++        return []
 +    return _block_device_mapping_get_query(context).\
-+                 filter_by(instance_uuid=volume_id).\
++                 filter_by(volume_id=volume_id).\
 +                 all()
 +
  
  @require_context
- def block_device_mapping_destroy(context, bdm_id):
+-def block_device_mapping_destroy(context, bdm_id):
++def block_device_mapping_destroy(context, bdm_id, is_nbs=False):
++    if not is_nbs:
++        return
+     session = get_session()
+     with session.begin():
+         session.query(models.BlockDeviceMapping).\
+@@ -3755,7 +3774,9 @@ def block_device_mapping_destroy(context, bdm_id):
+ 
+ @require_context
+ def block_device_mapping_destroy_by_instance_and_volume(context, instance_uuid,
+-                                                        volume_id):
++                                                    volume_id, is_nbs=False):
++    if not is_nbs:
++        return
+     session = get_session()
+     with session.begin():
+         _block_device_mapping_get_query(context, session=session).\
+@@ -3768,7 +3789,9 @@ def block_device_mapping_destroy_by_instance_and_volume(context, instance_uuid,
+ 
+ @require_context
+ def block_device_mapping_destroy_by_instance_and_device(context, instance_uuid,
+-                                                        device_name):
++                                                    device_name, is_nbs=False):
++    if not is_nbs:
++        return
+     session = get_session()
+     with session.begin():
+         _block_device_mapping_get_query(context, session=session).\
 diff --git a/nova/exception.py b/nova/exception.py
 index 2c3e7bb..274646d 100644
 --- a/nova/exception.py
@@ -1378,11 +1526,50 @@ index 8be6ff7..293c150 100644
      def detach_volume(self, connection_info, instance_name, mountpoint):
          """Detach the disk attached to the instance"""
          raise NotImplementedError()
+diff --git a/nova/virt/libvirt/config.py b/nova/virt/libvirt/config.py
+index 5b63919..4e088f8 100644
+--- a/nova/virt/libvirt/config.py
++++ b/nova/virt/libvirt/config.py
+@@ -364,6 +364,8 @@ class LibvirtConfigGuestDisk(LibvirtConfigGuestDevice):
+         self.auth_secret_type = None
+         self.auth_secret_uuid = None
+         self.serial = None
++        self.iotune = None
++        self.slot = None
+ 
+     def format_dom(self):
+         dev = super(LibvirtConfigGuestDisk, self).format_dom()
+@@ -408,6 +410,25 @@ class LibvirtConfigGuestDisk(LibvirtConfigGuestDevice):
+         if self.serial is not None:
+             dev.append(self._text_node("serial", self.serial))
+ 
++        if self.slot is not None:
++            address = etree.Element("address")
++            address.set("type", "pci")
++            address.set("domain", "0x0000")
++            address.set("bus", "0x00")
++            address.set("slot", "0x%0.2x" % self.slot)
++            address.set("function", "0x0")
++            dev.append(address)
++
++        if self.iotune is not None:
++            iotune = etree.Element("iotune")
++            if self.iotune.get("iotune_total_bytes", None) is not None:
++                iotune.append(self._text_node("total_bytes_sec",
++                                    self.iotune["iotune_total_bytes"]))
++            if self.iotune.get("iotune_total_iops", None) is not None:
++                iotune.append(self._text_node("total_iops_sec",
++                                    self.iotune["iotune_total_iops"]))
++            dev.append(iotune)
++
+         return dev
+ 
+ 
 diff --git a/nova/virt/libvirt/driver.py b/nova/virt/libvirt/driver.py
-index 5bd7529..80f5723 100644
+index 5bd7529..5f8c74f 100644
 --- a/nova/virt/libvirt/driver.py
 +++ b/nova/virt/libvirt/driver.py
-@@ -734,6 +734,144 @@ class LibvirtDriver(driver.ComputeDriver):
+@@ -734,6 +734,137 @@ class LibvirtDriver(driver.ComputeDriver):
          method = getattr(driver, method_name)
          return method(connection_info, *args, **kwargs)
  
@@ -1423,8 +1610,8 @@ index 5bd7529..80f5723 100644
 +            if id not in used_pci_slot_ids and id not in used_dev['slot']:
 +                free_slot = id
 +
-+        # vd[c-z]
-+        for i in range(99, 123):
++        # vd[d-z], skip root, ephemeral and swap disk
++        for i in range(100, 123):
 +            dev = 'vd' + chr(i)
 +            if dev not in used_disk_devs and dev not in used_dev['dev']:
 +                free_dev = dev
@@ -1474,24 +1661,17 @@ index 5bd7529..80f5723 100644
 +            LOG.error(_("LXC hypervisor is not supported to attach volume."))
 +            raise exception.NotSupported()
 +
-+        mount_device = device['mountpoint'].rpartition("/")[2]
-+        slot = device['slot']
-+        iotune_total_bytes = qos_info['iotune_total_bytes']
-+        iotune_total_iops = qos_info['iotune_total_iops']
-+        disk_xml = '''<disk type='block'>
-+                        <driver name='qemu' type='raw' cache='none'/>
-+                        <source dev='%s'/>
-+                        <target dev='%s' bus='virtio'/>
-+                        <address type='pci' domain='0x0000' \
-+                         bus='0x00' slot='0x%0.2x' function='0x0'/>
-+                        <iotune>
-+                          <total_bytes_sec>%d</total_bytes_sec>
-+                          <total_iops_sec>%d</total_iops_sec>
-+                        </iotune>
-+                        <serial>%s</serial>
-+                      </disk>''' % (host_dev, mount_device, slot,
-+                                    iotune_total_bytes, iotune_total_iops,
-+                                    volume_id)
++        conf = config.LibvirtConfigGuestDisk()
++        conf.source_type = "block"
++        conf.driver_name = libvirt_utils.pick_disk_driver_name(
++                                            is_block_dev=True)
++        conf.driver_format = "raw"
++        conf.driver_cache = "none"
++        conf.source_path = host_dev
++        conf.target_dev = device['mountpoint'].rpartition("/")[2]
++        conf.target_bus = "virtio"
++        conf.serial = volume_id
++        conf.iotune = vol['qos_info']
 +
 +        virt_dom = self._lookup_by_name(instance_name)
 +        try:
@@ -1502,7 +1682,7 @@ index 5bd7529..80f5723 100644
 +            state = LIBVIRT_POWER_STATE[virt_dom.info()[0]]
 +            if state == power_state.RUNNING:
 +                flags |= libvirt.VIR_DOMAIN_AFFECT_LIVE
-+            virt_dom.attachDeviceFlags(disk_xml, flags)
++            virt_dom.attachDeviceFlags(conf.to_xml(), flags)
 +            return (False, None)
 +        except Exception as ex:
 +            if isinstance(ex, libvirt.libvirtError):
@@ -1527,7 +1707,7 @@ index 5bd7529..80f5723 100644
      @exception.wrap_exception()
      def attach_volume(self, connection_info, instance_name, mountpoint):
          virt_dom = self._lookup_by_name(instance_name)
-@@ -792,6 +930,38 @@ class LibvirtDriver(driver.ComputeDriver):
+@@ -792,6 +923,38 @@ class LibvirtDriver(driver.ComputeDriver):
          return xml
  
      @exception.wrap_exception()
@@ -1566,3 +1746,39 @@ index 5bd7529..80f5723 100644
      def detach_volume(self, connection_info, instance_name, mountpoint):
          mount_device = mountpoint.rpartition("/")[2]
          try:
+@@ -2091,13 +2254,28 @@ class LibvirtDriver(driver.ComputeDriver):
+                         nova_context.get_admin_context(), instance['uuid'],
+                         {'default_swap_device': '/dev/' + swap_device})
+ 
+-                for vol in block_device_mapping:
+-                    connection_info = vol['connection_info']
+-                    mount_device = vol['mount_device'].rpartition("/")[2]
+-                    cfg = self.volume_driver_method('connect_volume',
+-                                                    connection_info,
+-                                                    mount_device)
+-                    devices.append(cfg)
++                if FLAGS.ebs_backend == 'nbs':
++                    for vol in block_device_mapping:
++                        cfg = config.LibvirtConfigGuestDisk()
++                        cfg.source_type = "block"
++                        cfg.driver_name = libvirt_utils.pick_disk_driver_name(
++                                                            is_block_dev=True)
++                        cfg.driver_format = "raw"
++                        cfg.driver_cache = "none"
++                        cfg.source_path = vol['host_dev']
++                        cfg.target_dev = vol['mount_device'].rpartition("/")[2]
++                        cfg.target_bus = "virtio"
++                        cfg.serial = vol['serial']
++                        cfg.iotune = vol['qos_info']
++                        devices.append(cfg)
++                else:
++                    for vol in block_device_mapping:
++                        connection_info = vol['connection_info']
++                        mount_device = vol['mount_device'].rpartition("/")[2]
++                        cfg = self.volume_driver_method('connect_volume',
++                                                        connection_info,
++                                                        mount_device)
++                        devices.append(cfg)
+ 
+             if (instance.get('config_drive') or
+                 instance.get('config_drive_id') or
