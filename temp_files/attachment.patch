@@ -1,4 +1,4 @@
-commit 1b9aef44942effc6271efa5541cea3f3c177977c
+commit 55097ed3b25b0d8b2e7a5c644143f94e5364fb46
 Author: Wangpan <hzwangpan@corp.netease.com>
 Date:   Thu May 16 17:59:56 2013 +0800
 
@@ -129,7 +129,7 @@ index d9368a4..175230e 100644
  class Server_status(extensions.ExtensionDescriptor):
      """Add server_status to the Create Server v1.1 API"""
 diff --git a/nova/api/openstack/compute/contrib/volumes.py b/nova/api/openstack/compute/contrib/volumes.py
-index 9940e30..7a6dc30 100644
+index 9940e30..7542406 100644
 --- a/nova/api/openstack/compute/contrib/volumes.py
 +++ b/nova/api/openstack/compute/contrib/volumes.py
 @@ -15,6 +15,8 @@
@@ -157,12 +157,15 @@ index 9940e30..7a6dc30 100644
          self.volume_api = volume.API()
          super(VolumeController, self).__init__()
  
-@@ -271,6 +275,62 @@ class VolumeController(wsgi.Controller):
+@@ -271,6 +275,65 @@ class VolumeController(wsgi.Controller):
  
          return wsgi.ResponseObject(result, headers=dict(location=location))
  
 +    def _extend_nbs_volume(self, req, id, body):
 +        """Extend a exists nbs volume."""
++        if FLAGS.nbs_api_server is None:
++            explanation = _("Cannot extend nbs volume, nbs server is None.")
++            raise exc.HTTPForbidden(explanation=explanation)
 +        context = req.environ['nova.context']
 +        authorize(context)
 +
@@ -220,12 +223,15 @@ index 9940e30..7a6dc30 100644
  
  def _translate_attachment_detail_view(volume_id, instance_uuid, mountpoint):
      """Maps keys for attachment details view."""
-@@ -375,9 +435,68 @@ class VolumeAttachmentController(wsgi.Controller):
+@@ -375,9 +438,71 @@ class VolumeAttachmentController(wsgi.Controller):
              instance['uuid'],
              assigned_mountpoint)}
  
 +    def _attach_nbs_volume(self, req, server_id, body):
 +        """Attach a nbs volume to an instance."""
++        if FLAGS.nbs_api_server is None:
++            explanation = _("Cannot attach nbs volume, nbs server is None.")
++            raise exc.HTTPForbidden(explanation=explanation)
 +        context = req.environ['nova.context']
 +        authorize(context)
 +
@@ -289,13 +295,15 @@ index 9940e30..7a6dc30 100644
          context = req.environ['nova.context']
          authorize(context)
  
-@@ -420,8 +539,55 @@ class VolumeAttachmentController(wsgi.Controller):
+@@ -420,8 +545,57 @@ class VolumeAttachmentController(wsgi.Controller):
          """Update a volume attachment.  We don't currently support this."""
          raise exc.HTTPBadRequest()
  
 +    def _detach_nbs_volume(self, req, server_id, id):
 +        """Detach a nbs volume from an instance."""
-+
++        if FLAGS.nbs_api_server is None:
++            explanation = _("Cannot detach nbs volume, nbs server is None.")
++            raise exc.HTTPForbidden(explanation=explanation)
 +        context = req.environ['nova.context']
 +        authorize(context)
 +
@@ -852,7 +860,7 @@ index 24de7ef..0000000
 -            LOG.exception(_('notification module error when do notifying '
 -                            'NVS connect NBS failed.'))
 diff --git a/nova/compute/manager.py b/nova/compute/manager.py
-index e863e73..54cd64d 100644
+index e863e73..ae53912 100644
 --- a/nova/compute/manager.py
 +++ b/nova/compute/manager.py
 @@ -50,8 +50,8 @@ from eventlet import greenthread
@@ -1276,7 +1284,7 @@ index e863e73..54cd64d 100644
 +                                    context=context, instance=instance)
 +                        raise exception.NoFreeDevice()
 +                    LOG.info(_("Retry to attach nbs volume %s at %s"
-+                            % (volume_id, device),
++                            % (volume_id, device)),
 +                            context=context, instance=instance)
 +        except Exception:  # pylint: disable=W0702
 +            with excutils.save_and_reraise_exception():
@@ -1898,6 +1906,20 @@ index c0112ce..e889f23 100644
  global_opts = [
      cfg.StrOpt('my_ip',
                 default=_get_my_ip(),
+diff --git a/nova/service.py b/nova/service.py
+index a9382e2..eb13cb9 100644
+--- a/nova/service.py
++++ b/nova/service.py
+@@ -99,9 +99,6 @@ service_opts = [
+     cfg.IntOpt('osapi_volume_workers',
+                default=None,
+                help='Number of workers for OpenStack Volume API service'),
+-    cfg.StrOpt('host_ip_ifname',
+-               default='',
+-               help='Network device to get intranet ip address'),
+     ]
+ 
+ FLAGS = flags.FLAGS
 diff --git a/nova/virt/driver.py b/nova/virt/driver.py
 index 8be6ff7..293c150 100644
 --- a/nova/virt/driver.py
