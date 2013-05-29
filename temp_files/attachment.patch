@@ -1,4 +1,4 @@
-commit 55097ed3b25b0d8b2e7a5c644143f94e5364fb46
+commit c1d5aca10bdd9c833b41dff151dfc124b1a50252
 Author: Wangpan <hzwangpan@corp.netease.com>
 Date:   Thu May 16 17:59:56 2013 +0800
 
@@ -129,7 +129,7 @@ index d9368a4..175230e 100644
  class Server_status(extensions.ExtensionDescriptor):
      """Add server_status to the Create Server v1.1 API"""
 diff --git a/nova/api/openstack/compute/contrib/volumes.py b/nova/api/openstack/compute/contrib/volumes.py
-index 9940e30..7542406 100644
+index 9940e30..c20b468 100644
 --- a/nova/api/openstack/compute/contrib/volumes.py
 +++ b/nova/api/openstack/compute/contrib/volumes.py
 @@ -15,6 +15,8 @@
@@ -141,7 +141,11 @@ index 9940e30..7542406 100644
  import webob
  from webob import exc
  from xml.dom import minidom
-@@ -27,6 +29,7 @@ from nova import compute
+@@ -24,9 +26,11 @@ from nova.api.openstack import extensions
+ from nova.api.openstack import wsgi
+ from nova.api.openstack import xmlutil
+ from nova import compute
++from nova.compute import vm_states
  from nova import exception
  from nova import flags
  from nova.openstack.common import log as logging
@@ -149,7 +153,7 @@ index 9940e30..7542406 100644
  from nova import utils
  from nova import volume
  from nova.volume import volume_types
-@@ -164,6 +167,7 @@ class VolumeController(wsgi.Controller):
+@@ -164,6 +168,7 @@ class VolumeController(wsgi.Controller):
      """The Volumes API controller for the OpenStack API."""
  
      def __init__(self):
@@ -157,7 +161,7 @@ index 9940e30..7542406 100644
          self.volume_api = volume.API()
          super(VolumeController, self).__init__()
  
-@@ -271,6 +275,65 @@ class VolumeController(wsgi.Controller):
+@@ -271,6 +276,68 @@ class VolumeController(wsgi.Controller):
  
          return wsgi.ResponseObject(result, headers=dict(location=location))
  
@@ -188,7 +192,7 @@ index 9940e30..7542406 100644
 +                # check instance exists
 +                instance = self.compute_api.get(context, instance_uuid)
 +                # Check os status if instance is 'ACTIVE'
-+                if instance['status'] == "ACTIVE":
++                if instance['vm_state'] == vm_states.ACTIVE:
 +                    server_heartbeat_period = FLAGS.get(
 +                                                'server_heartbeat_period', 10)
 +                    os_status = self.compute_api.instance_os_boot_ready(
@@ -199,6 +203,9 @@ index 9940e30..7542406 100644
 +                        explanation = _("Cannot extend volume while instance "
 +                                        "os is starting.")
 +                        raise exc.HTTPForbidden(explanation=explanation)
++            except exception.MemCacheClientNotFound:
++                explanation = _("Memory cache client is not found")
++                raise exc.HTTPServerError(explanation=explanation)
 +            except exception.NotFound:
 +                explanation = _("Instance %s not found.") % instance_uuid
 +                raise exc.HTTPNotFound(explanation=explanation)
@@ -223,7 +230,7 @@ index 9940e30..7542406 100644
  
  def _translate_attachment_detail_view(volume_id, instance_uuid, mountpoint):
      """Maps keys for attachment details view."""
-@@ -375,9 +438,71 @@ class VolumeAttachmentController(wsgi.Controller):
+@@ -375,9 +442,74 @@ class VolumeAttachmentController(wsgi.Controller):
              instance['uuid'],
              assigned_mountpoint)}
  
@@ -249,7 +256,7 @@ index 9940e30..7542406 100644
 +            # TODO(wangpan): if the instance forbid to attach nbs volume,
 +            #                raise exception.
 +            # Check os status if instance is 'ACTIVE'
-+            if instance['status'] == "ACTIVE":
++            if instance['vm_state'] == vm_states.ACTIVE:
 +                server_heartbeat_period = FLAGS.get('server_heartbeat_period',
 +                                                    10)
 +                os_status = self.compute_api.instance_os_boot_ready(context,
@@ -261,6 +268,9 @@ index 9940e30..7542406 100644
 +                    raise exc.HTTPForbidden(explanation=explanation)
 +            device = self.compute_api.attach_nbs_volume(context, instance,
 +                                                        volume_id)
++        except exception.MemCacheClientNotFound:
++            explanation = _("Memory cache client is not found")
++            raise exc.HTTPServerError(explanation=explanation)
 +        except exception.NotFound:
 +            explanation = _("Instance %s not found.") % server_id
 +            raise exc.HTTPNotFound(explanation=explanation)
@@ -270,7 +280,7 @@ index 9940e30..7542406 100644
 +        attachment['requestId'] = context.request_id
 +        attachment['instanceId'] = instance['uuid']
 +        attachment['volumeId'] = volume_id
-+        attachment['device'] = device['real_path']
++        attachment['device'] = device
 +        attachment['status'] = "attaching"
 +        attachment['attachTime'] = long(time.time())
 +
@@ -295,7 +305,7 @@ index 9940e30..7542406 100644
          context = req.environ['nova.context']
          authorize(context)
  
-@@ -420,8 +545,57 @@ class VolumeAttachmentController(wsgi.Controller):
+@@ -420,8 +552,57 @@ class VolumeAttachmentController(wsgi.Controller):
          """Update a volume attachment.  We don't currently support this."""
          raise exc.HTTPBadRequest()
  
@@ -407,7 +417,7 @@ index 45cb779..e4ec3c7 100644
              raise exc.HTTPNotFound()
          except exception.InstanceInvalidState as state_error:
 diff --git a/nova/compute/api.py b/nova/compute/api.py
-index bd417fe..1e81eb4 100644
+index bd417fe..82b1daa 100644
 --- a/nova/compute/api.py
 +++ b/nova/compute/api.py
 @@ -22,14 +22,18 @@
@@ -491,12 +501,12 @@ index bd417fe..1e81eb4 100644
  
      @wrap_check_policy
      @check_instance_lock
-@@ -2104,6 +2114,121 @@ class API(base.Base):
+@@ -2104,6 +2114,123 @@ class API(base.Base):
          """Inject network info for the instance."""
          self.compute_rpcapi.inject_network_info(context, instance=instance)
  
 +    def _get_memcache_client(self):
-+        """Return memcache client"""
++        """Return memcache client."""
 +        global MEMCACHE_CLIENT_API
 +        if MEMCACHE_CLIENT_API is not None:
 +            return MEMCACHE_CLIENT_API
@@ -525,15 +535,13 @@ index bd417fe..1e81eb4 100644
 +                if abs(elapsed) <= interval:
 +                    status = 'up'
 +        else:
-+            msg = _('Store data can not catch')
-+            raise exc.HTTPServerError(explanation=msg)
++            raise exception.MemCacheClientNotFound()
 +
 +        return {'instance_uuid': instance_uuid,
 +                'status': status}
 +
-+    def check_nbs_attached(context, volume_id, instance_uuid=None):
-+        """
-+        """
++    def check_nbs_attached(self, context, volume_id, instance_uuid=None):
++        """Check nbs volume is attached or not."""
 +        volumes = self.nbs_api.get(context, volume_id)['volumes']
 +        if len(volumes) == 0:
 +            raise exception.VolumeNotFound(volume_id=volume_id)
@@ -554,7 +562,10 @@ index bd417fe..1e81eb4 100644
 +
 +    @check_instance_lock
 +    def extend_nbs_volume(self, context, volume_id, size, instance=None):
-+        """ """
++        """
++        Extend nbs volume, and if it has been attached, call libvirt to
++        extend it in instance.
++        """
 +        if instance is None:
 +            # call nbs to extend the volume, we do nothing
 +            self.nbs_api.extend(context, volume_id, size)
@@ -578,7 +589,7 @@ index bd417fe..1e81eb4 100644
 +            raise exception.VolumeNotFound(volume_id=volume_id)
 +
 +        volume = volumes[0]
-+        if int(volume.get('status', None)) != 'available':
++        if volume.get('status', None) != 'available':
 +            reason = _("Volume %s is not available") % volume_id
 +            raise exception.InvalidVolume(reason=reason)
 +
@@ -602,6 +613,7 @@ index bd417fe..1e81eb4 100644
 +            raise exception.InvalidVolume(reason=reason)
 +        else:
 +            values = {'instance_uuid': instance['uuid'],
++                      'virtual_name': None,
 +                      'device_name': jsonutils.dumps(device),
 +                      'volume_id': volume_id}
 +            self.db.block_device_mapping_update_or_create(context, values)
@@ -613,7 +625,7 @@ index bd417fe..1e81eb4 100644
      @wrap_check_policy
      @check_instance_lock
      def attach_volume(self, context, instance, volume_id, device=None):
-@@ -2135,6 +2260,15 @@ class API(base.Base):
+@@ -2135,6 +2262,15 @@ class API(base.Base):
          return device
  
      @check_instance_lock
@@ -629,7 +641,7 @@ index bd417fe..1e81eb4 100644
      def _detach_volume(self, context, instance, volume_id):
          check_policy(context, 'detach_volume', instance)
  
-@@ -2219,8 +2353,12 @@ class API(base.Base):
+@@ -2219,8 +2355,12 @@ class API(base.Base):
          uuids = [instance['uuid'] for instance in instances]
          return self.db.instance_fault_get_by_instance_uuids(context, uuids)
  
@@ -860,7 +872,7 @@ index 24de7ef..0000000
 -            LOG.exception(_('notification module error when do notifying '
 -                            'NVS connect NBS failed.'))
 diff --git a/nova/compute/manager.py b/nova/compute/manager.py
-index e863e73..ae53912 100644
+index e863e73..d5e4b30 100644
 --- a/nova/compute/manager.py
 +++ b/nova/compute/manager.py
 @@ -50,8 +50,8 @@ from eventlet import greenthread
@@ -967,7 +979,7 @@ index e863e73..ae53912 100644
          for bdm in bdms:
              # NOTE(vish): Comparing as strings because the os_api doesn't
              #             convert to integer and we may wish to support uuids
-@@ -1382,9 +1423,26 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -1382,9 +1423,27 @@ class ComputeManager(manager.SchedulerDependentManager):
              if str(bdm['volume_id']) == str(volume_id):
                  return bdm
  
@@ -984,7 +996,8 @@ index e863e73..ae53912 100644
 +        if FLAGS.ebs_backend == 'nbs' and is_nbs:
 +            for bdm in bdms:
 +                cinfo = jsonutils.loads(bdm['connection_info'])
-+                mp = jsonutils.loads(bdm['device_name']).get('mountpoint', None)
++                mp = jsonutils.loads(bdm['device_name']).get('mountpoint',
++                                                            None)
 +                bdmap = {'host_dev': cinfo.get('host_dev', None),
 +                         'qos_info': cinfo.get('qos_info', None),
 +                         'mount_device': mp,
@@ -996,7 +1009,7 @@ index e863e73..ae53912 100644
          for bdm in bdms:
              try:
                  cinfo = jsonutils.loads(bdm['connection_info'])
-@@ -1422,7 +1480,7 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -1422,7 +1481,7 @@ class ComputeManager(manager.SchedulerDependentManager):
                      admin_password, is_first_time, instance)
          do_run_instance()
  
@@ -1005,7 +1018,7 @@ index e863e73..ae53912 100644
          """Shutdown an instance on this host."""
          context = context.elevated()
          LOG.audit(_('%(action_str)s instance') % {'action_str': 'Terminating'},
-@@ -1442,6 +1500,8 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -1442,6 +1501,8 @@ class ComputeManager(manager.SchedulerDependentManager):
                    instance=instance)
  
          # NOTE(vish) get bdms before destroying the instance
@@ -1014,7 +1027,7 @@ index e863e73..ae53912 100644
          bdms = self._get_instance_volume_bdms(context, instance['uuid'])
          block_device_info = self._get_instance_volume_block_device_info(
              context, instance['uuid'])
-@@ -1452,21 +1512,6 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -1452,21 +1513,6 @@ class ComputeManager(manager.SchedulerDependentManager):
          LOG.debug(_("libvirt driver destroy instance end."),
                    context=context, instance=instance)
  
@@ -1036,7 +1049,7 @@ index e863e73..ae53912 100644
          for bdm in bdms:
              try:
                  # NOTE(vish): actual driver detach done in driver.destroy, so
-@@ -1487,6 +1532,11 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -1487,6 +1533,11 @@ class ComputeManager(manager.SchedulerDependentManager):
          self._notify_about_instance_usage(context, instance, "shutdown.end")
  
      def _cleanup_volumes(self, context, instance_uuid):
@@ -1048,7 +1061,7 @@ index e863e73..ae53912 100644
          bdms = self.db.block_device_mapping_get_all_by_instance(context,
                                                                  instance_uuid)
          for bdm in bdms:
-@@ -1497,12 +1547,12 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -1497,12 +1548,12 @@ class ComputeManager(manager.SchedulerDependentManager):
                  self.volume_api.delete(context, volume)
              # NOTE(vish): bdms will be deleted on instance destroy
  
@@ -1063,7 +1076,7 @@ index e863e73..ae53912 100644
          # NOTE(vish): We have already deleted the instance, so we have
          #             to ignore problems cleaning up the volumes. It would
          #             be nice to let the user know somehow that the volume
-@@ -1531,7 +1581,7 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -1531,7 +1582,7 @@ class ComputeManager(manager.SchedulerDependentManager):
  
      @exception.wrap_exception(notifier=notifier, publisher_id=publisher_id())
      @wrap_instance_fault
@@ -1072,7 +1085,7 @@ index e863e73..ae53912 100644
          """Terminate an instance on this host.  """
          # Note(eglynn): we do not decorate this action with reverts_task_state
          # because a failure during termination should leave the task state as
-@@ -1542,9 +1592,9 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -1542,9 +1593,9 @@ class ComputeManager(manager.SchedulerDependentManager):
          elevated = context.elevated()
  
          @utils.synchronized(instance['uuid'])
@@ -1084,7 +1097,7 @@ index e863e73..ae53912 100644
              except exception.InstanceTerminationFailure as error:
                  msg = _('%s. Setting instance vm_state to ERROR')
                  LOG.error(msg % error, instance=instance)
-@@ -1552,7 +1602,7 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -1552,7 +1603,7 @@ class ComputeManager(manager.SchedulerDependentManager):
              except exception.InstanceNotFound as e:
                  LOG.warn(e, instance=instance)
  
@@ -1093,7 +1106,7 @@ index e863e73..ae53912 100644
  
      @exception.wrap_exception(notifier=notifier, publisher_id=publisher_id())
      @reverts_task_state
-@@ -1724,7 +1774,7 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -1724,7 +1775,7 @@ class ComputeManager(manager.SchedulerDependentManager):
          network_info = self._get_instance_nw_info(context, instance)
  
          block_device_info = self._get_instance_volume_block_device_info(
@@ -1102,7 +1115,7 @@ index e863e73..ae53912 100644
  
          try:
              self.driver.reboot(instance, self._legacy_nw_info(network_info),
-@@ -2500,7 +2550,12 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -2500,7 +2551,12 @@ class ComputeManager(manager.SchedulerDependentManager):
                                  self._legacy_nw_info(network_info),
                                  block_device_info)
  
@@ -1116,7 +1129,7 @@ index e863e73..ae53912 100644
              if bdms:
                  connector = self.driver.get_volume_connector(instance)
                  for bdm in bdms:
-@@ -2594,9 +2649,14 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -2594,9 +2650,14 @@ class ComputeManager(manager.SchedulerDependentManager):
              else:
                  image_meta = self._check_image_size(context, instance)
  
@@ -1132,7 +1145,7 @@ index e863e73..ae53912 100644
  
              if bdms:
                  connector = self.driver.get_volume_connector(instance)
-@@ -2878,6 +2938,23 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -2878,6 +2939,23 @@ class ComputeManager(manager.SchedulerDependentManager):
      @exception.wrap_exception(notifier=notifier, publisher_id=publisher_id())
      @reverts_task_state
      @wrap_instance_fault
@@ -1156,7 +1169,7 @@ index e863e73..ae53912 100644
      def reserve_block_device_name(self, context, instance, device):
  
          @utils.synchronized(instance['uuid'])
-@@ -2892,6 +2969,163 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -2892,6 +2970,164 @@ class ComputeManager(manager.SchedulerDependentManager):
              return result
          return do_reserve()
  
@@ -1261,7 +1274,8 @@ index e863e73..ae53912 100644
 +
 +            # NOTE(vish): create bdm here to avoid race condition
 +            values = {'instance_uuid': instance['uuid'],
-+                      'device_name': jsonutils.dumps(result)}
++                      'device_name': jsonutils.dumps(result),
++                      'virtual_name': None}
 +            self.db.block_device_mapping_update_or_create(context, values)
 +            return result
 +
@@ -1320,7 +1334,7 @@ index e863e73..ae53912 100644
      @exception.wrap_exception(notifier=notifier, publisher_id=publisher_id())
      @reverts_task_state
      @wrap_instance_fault
-@@ -2956,6 +3190,47 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -2956,6 +3192,47 @@ class ComputeManager(manager.SchedulerDependentManager):
              'no_device': None}
          self.db.block_device_mapping_update_or_create(context, values)
  
@@ -1368,7 +1382,7 @@ index e863e73..ae53912 100644
      def _detach_volume(self, context, instance, bdm):
          """Do the actual driver detach using block device mapping."""
          mp = bdm['device_name']
-@@ -3154,6 +3429,10 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -3154,6 +3431,10 @@ class ComputeManager(manager.SchedulerDependentManager):
                   instance=instance_ref)
  
          # Detaching volumes.
@@ -1379,7 +1393,7 @@ index e863e73..ae53912 100644
          for bdm in self._get_instance_volume_bdms(ctxt, instance_ref['uuid']):
              # NOTE(vish): We don't want to actually mark the volume
              #             detached, or delete the bdm, just remove the
-@@ -3282,12 +3561,16 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -3282,12 +3563,16 @@ class ComputeManager(manager.SchedulerDependentManager):
          self.network_api.setup_networks_on_host(context, instance_ref,
                                                           self.host)
  
@@ -1827,7 +1841,7 @@ index fef3f99..297e871 100644
  @require_context
  def block_device_mapping_destroy(context, bdm_id):
 diff --git a/nova/exception.py b/nova/exception.py
-index 2c3e7bb..274646d 100644
+index 2c3e7bb..3fdee4e 100644
 --- a/nova/exception.py
 +++ b/nova/exception.py
 @@ -378,6 +378,10 @@ class DevicePathInUse(Invalid):
@@ -1841,7 +1855,7 @@ index 2c3e7bb..274646d 100644
  class DeviceIsBusy(Invalid):
      message = _("The supplied device (%(device)s) is busy.")
  
-@@ -1141,6 +1145,18 @@ class EcuKeyError(NovaException):
+@@ -1141,6 +1145,22 @@ class EcuKeyError(NovaException):
      message = _("Key 'ecus_per_vcpu:' may not be set")
  
  
@@ -1855,6 +1869,10 @@ index 2c3e7bb..274646d 100644
 +
 +class NotSupported(NovaException):
 +    message = _("Operation is not supported currently")
++
++
++class MemCacheClientNotFound(NotFound):
++    message = _("Memory cache client is not found")
 +
 +
  class TcInvalid(Invalid):
@@ -1921,13 +1939,17 @@ index a9382e2..eb13cb9 100644
  
  FLAGS = flags.FLAGS
 diff --git a/nova/virt/driver.py b/nova/virt/driver.py
-index 8be6ff7..293c150 100644
+index 8be6ff7..3064ab7 100644
 --- a/nova/virt/driver.py
 +++ b/nova/virt/driver.py
-@@ -233,10 +233,23 @@ class ComputeDriver(object):
+@@ -233,10 +233,27 @@ class ComputeDriver(object):
          # TODO(Vek): Need to pass context in for access to auth_token
          raise NotImplementedError()
  
++    def get_device_for_nbs_volume(self, instance_name, used_dev):
++        """Generates a device name for attaching nbs volume"""
++        raise NotImplementedError()
++
 +    def extend_nbs_volume(self, instance_name, device, size):
 +        """Attach the disk to the instance at mountpoint using info"""
 +        raise NotImplementedError()
@@ -1988,10 +2010,10 @@ index 5b63919..4e088f8 100644
  
  
 diff --git a/nova/virt/libvirt/driver.py b/nova/virt/libvirt/driver.py
-index 5bd7529..d471a99 100644
+index 5bd7529..3d7eb8c 100644
 --- a/nova/virt/libvirt/driver.py
 +++ b/nova/virt/libvirt/driver.py
-@@ -734,6 +734,139 @@ class LibvirtDriver(driver.ComputeDriver):
+@@ -734,6 +734,145 @@ class LibvirtDriver(driver.ComputeDriver):
          method = getattr(driver, method_name)
          return method(connection_info, *args, **kwargs)
  
@@ -2024,24 +2046,30 @@ index 5bd7529..d471a99 100644
 +        disks = doc.findall('./devices/disk')
 +        used_disk_devs = [disk.find('target').attrib['dev'] for disk in disks]
 +
++        if used_dev is not None:
++            if used_dev.get('slot', None) is not None:
++                used_pci_slot_ids.append(used_dev['slot'])
++            if used_dev.get('dev', None) is not None:
++                used_disk_devs.append(used_dev['dev'])
++
 +        free_slot = None
 +        free_dev = None
 +
 +        # slot id range is 0-31
 +        for id in range(31, 0, -1):
-+            if id not in used_pci_slot_ids and id not in used_dev['slot']:
++            if id not in used_pci_slot_ids:
 +                free_slot = id
 +
 +        # vd[d-z], skip root, ephemeral and swap disk
 +        for i in range(100, 123):
 +            dev = 'vd' + chr(i)
-+            if dev not in used_disk_devs and dev not in used_dev['dev']:
++            if dev not in used_disk_devs:
 +                free_dev = dev
 +
 +        return (free_slot, free_dev)
 +
 +
-+    def get_device_for_nbs_volume(instance_name, used_dev):
++    def get_device_for_nbs_volume(self, instance_name, used_dev):
 +        """Generates a device name for attaching nbs volume"""
 +        free_slot, free_dev = self._find_free_dev_and_pcislot(instance_name,
 +                                                                used_dev)
@@ -2131,7 +2159,7 @@ index 5bd7529..d471a99 100644
      @exception.wrap_exception()
      def attach_volume(self, connection_info, instance_name, mountpoint):
          virt_dom = self._lookup_by_name(instance_name)
-@@ -792,6 +925,39 @@ class LibvirtDriver(driver.ComputeDriver):
+@@ -792,6 +931,39 @@ class LibvirtDriver(driver.ComputeDriver):
          return xml
  
      @exception.wrap_exception()
@@ -2171,7 +2199,7 @@ index 5bd7529..d471a99 100644
      def detach_volume(self, connection_info, instance_name, mountpoint):
          mount_device = mountpoint.rpartition("/")[2]
          try:
-@@ -2091,13 +2257,28 @@ class LibvirtDriver(driver.ComputeDriver):
+@@ -2091,13 +2263,28 @@ class LibvirtDriver(driver.ComputeDriver):
                          nova_context.get_admin_context(), instance['uuid'],
                          {'default_swap_device': '/dev/' + swap_device})
  
@@ -2207,7 +2235,7 @@ index 5bd7529..d471a99 100644
  
              if (instance.get('config_drive') or
                  instance.get('config_drive_id') or
-@@ -2405,15 +2586,19 @@ class LibvirtDriver(driver.ComputeDriver):
+@@ -2405,15 +2592,19 @@ class LibvirtDriver(driver.ComputeDriver):
                      break
              return (remove_dev_notfound, etree.tostring(domain_root))
  
