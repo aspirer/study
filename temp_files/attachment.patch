@@ -1,4 +1,4 @@
-commit a318ffb938ce51af6e5083a965f8f14948e2cfc0
+commit 886d71ced5701c45965e2b8f308c99682885d75b
 Author: Wangpan <hzwangpan@corp.netease.com>
 Date:   Thu May 16 17:59:56 2013 +0800
 
@@ -1790,7 +1790,7 @@ index 0000000..4b103e2
 +            LOG.exception(_('notification module error when do notifying '
 +                            'NVS connect NBS failed.'))
 diff --git a/nova/compute/rpcapi.py b/nova/compute/rpcapi.py
-index 0cd2668..9a630b4 100644
+index 0cd2668..a3f9fc9 100644
 --- a/nova/compute/rpcapi.py
 +++ b/nova/compute/rpcapi.py
 @@ -170,6 +170,19 @@ class ComputeAPI(nova.openstack.common.rpc.proxy.RpcProxy):
@@ -1839,6 +1839,19 @@ index 0cd2668..9a630b4 100644
      def reserve_block_device_name(self, ctxt, instance, device):
          instance_p = jsonutils.to_primitive(instance)
          return self.call(ctxt, self.make_msg('reserve_block_device_name',
+@@ -492,10 +517,10 @@ class ComputeAPI(nova.openstack.common.rpc.proxy.RpcProxy):
+                 instance=instance_p),
+                 topic=_compute_topic(self.topic, ctxt, None, instance))
+ 
+-    def terminate_instance(self, ctxt, instance, del_ebs=False):
++    def terminate_instance(self, ctxt, instance):
+         instance_p = jsonutils.to_primitive(instance)
+         self.cast(ctxt, self.make_msg('terminate_instance',
+-                instance=instance_p, del_ebs=del_ebs),
++                instance=instance_p),
+                 topic=_compute_topic(self.topic, ctxt, None, instance))
+ 
+     def unpause_instance(self, ctxt, instance):
 diff --git a/nova/compute/utils.py b/nova/compute/utils.py
 index a8a0a65..f331510 100644
 --- a/nova/compute/utils.py
