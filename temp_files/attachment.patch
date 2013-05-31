@@ -1,4 +1,4 @@
-commit cf2fcdb49a35fa03e37384e46760c6ff344f7d8c
+commit eb010b465d73f65a739757362e79862f85257468
 Author: Wangpan <hzwangpan@corp.netease.com>
 Date:   Thu May 16 17:59:56 2013 +0800
 
@@ -129,7 +129,7 @@ index d9368a4..175230e 100644
  class Server_status(extensions.ExtensionDescriptor):
      """Add server_status to the Create Server v1.1 API"""
 diff --git a/nova/api/openstack/compute/contrib/volumes.py b/nova/api/openstack/compute/contrib/volumes.py
-index 9940e30..1662ba8 100644
+index 9940e30..2b2ab1d 100644
 --- a/nova/api/openstack/compute/contrib/volumes.py
 +++ b/nova/api/openstack/compute/contrib/volumes.py
 @@ -15,6 +15,8 @@
@@ -174,7 +174,7 @@ index 9940e30..1662ba8 100644
 +        authorize(context)
 +
 +        if 'size' not in body or not isinstance(body['size'], int):
-+            explanation = _("size is needed in body.")
++            explanation = _("Paramater size is needed in body.")
 +            raise exc.HTTPUnprocessableEntity(explanation=explanation)
 +        try:
 +            instance_uuid = self.compute_api.check_nbs_attached(context, id)
@@ -887,7 +887,7 @@ index 24de7ef..0000000
 -            LOG.exception(_('notification module error when do notifying '
 -                            'NVS connect NBS failed.'))
 diff --git a/nova/compute/manager.py b/nova/compute/manager.py
-index e863e73..8483771 100644
+index e863e73..363cc24 100644
 --- a/nova/compute/manager.py
 +++ b/nova/compute/manager.py
 @@ -36,12 +36,14 @@ terminating it.
@@ -924,7 +924,7 @@ index e863e73..8483771 100644
          self._last_host_check = 0
          self._last_bw_usage_poll = 0
          self._last_info_cache_heal = 0
-@@ -466,6 +468,34 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -466,6 +468,35 @@ class ComputeManager(manager.SchedulerDependentManager):
          else:
              LOG.warning(_('get instance storage device for ioqos failed!'))
  
@@ -936,7 +936,7 @@ index e863e73..8483771 100644
 +        disappeared_host_devs = []
 +
 +        for bdm in bdms:
-+            host_dev = jsonutils.loads(bdm['connect_info']).get('host_dev')
++            host_dev = jsonutils.loads(bdm['connection_info']).get('host_dev')
 +            if host_dev is not None and not os.path.exists(host_dev):
 +                disappeared_host_devs.append(host_dev)
 +
@@ -944,7 +944,8 @@ index e863e73..8483771 100644
 +            return wait_ticks
 +
 +        while len(disappeared_host_devs) > 0 and wait_ticks > 0:
-+            LOG.info(_("Wait for nbs volume %s 3 seconds") % host_dev)
++            LOG.info(_("Wait for nbs volume %s 3 seconds, ticks: %d")
++                    % (host_dev, wait_ticks))
 +            time.sleep(3)
 +            wait_ticks -= 1
 +            disappeared_host_devs = [host_dev for host_dev in
@@ -959,7 +960,7 @@ index e863e73..8483771 100644
      def init_host(self):
          """Initialization for a standalone compute service."""
          self.driver.init_host(host=self.host)
-@@ -478,6 +508,8 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -478,6 +509,8 @@ class ComputeManager(manager.SchedulerDependentManager):
          if FLAGS.defer_iptables_apply:
              self.driver.filter_defer_apply_on()
  
@@ -968,7 +969,7 @@ index e863e73..8483771 100644
          try:
              for count, instance in enumerate(instances):
                  db_state = instance['power_state']
-@@ -514,9 +546,12 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -514,9 +547,12 @@ class ComputeManager(manager.SchedulerDependentManager):
                             _('Rebooting instance after nova-compute restart.'),
                             locals(), instance=instance)
  
@@ -982,7 +983,7 @@ index e863e73..8483771 100644
  
                      try:
                          self.driver.resume_state_on_host_boot(
-@@ -624,6 +659,11 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -624,6 +660,11 @@ class ComputeManager(manager.SchedulerDependentManager):
  
      def _setup_block_device_mapping(self, context, instance):
          """setup volumes for block device mapping"""
@@ -994,7 +995,7 @@ index e863e73..8483771 100644
          block_device_mapping = []
          swap = None
          ephemerals = []
-@@ -1368,13 +1408,19 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -1368,13 +1409,19 @@ class ComputeManager(manager.SchedulerDependentManager):
          LOG.debug(_('Deallocating network for instance'), instance=instance)
          self.network_api.deallocate_for_instance(context, instance)
  
@@ -1019,7 +1020,7 @@ index e863e73..8483771 100644
          for bdm in bdms:
              # NOTE(vish): Comparing as strings because the os_api doesn't
              #             convert to integer and we may wish to support uuids
-@@ -1382,9 +1428,27 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -1382,9 +1429,27 @@ class ComputeManager(manager.SchedulerDependentManager):
              if str(bdm['volume_id']) == str(volume_id):
                  return bdm
  
@@ -1049,7 +1050,7 @@ index e863e73..8483771 100644
          for bdm in bdms:
              try:
                  cinfo = jsonutils.loads(bdm['connection_info'])
-@@ -1422,7 +1486,7 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -1422,7 +1487,7 @@ class ComputeManager(manager.SchedulerDependentManager):
                      admin_password, is_first_time, instance)
          do_run_instance()
  
@@ -1058,7 +1059,7 @@ index e863e73..8483771 100644
          """Shutdown an instance on this host."""
          context = context.elevated()
          LOG.audit(_('%(action_str)s instance') % {'action_str': 'Terminating'},
-@@ -1442,6 +1506,8 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -1442,6 +1507,8 @@ class ComputeManager(manager.SchedulerDependentManager):
                    instance=instance)
  
          # NOTE(vish) get bdms before destroying the instance
@@ -1067,7 +1068,7 @@ index e863e73..8483771 100644
          bdms = self._get_instance_volume_bdms(context, instance['uuid'])
          block_device_info = self._get_instance_volume_block_device_info(
              context, instance['uuid'])
-@@ -1452,21 +1518,6 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -1452,21 +1519,6 @@ class ComputeManager(manager.SchedulerDependentManager):
          LOG.debug(_("libvirt driver destroy instance end."),
                    context=context, instance=instance)
  
@@ -1089,7 +1090,7 @@ index e863e73..8483771 100644
          for bdm in bdms:
              try:
                  # NOTE(vish): actual driver detach done in driver.destroy, so
-@@ -1487,6 +1538,11 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -1487,6 +1539,11 @@ class ComputeManager(manager.SchedulerDependentManager):
          self._notify_about_instance_usage(context, instance, "shutdown.end")
  
      def _cleanup_volumes(self, context, instance_uuid):
@@ -1101,7 +1102,7 @@ index e863e73..8483771 100644
          bdms = self.db.block_device_mapping_get_all_by_instance(context,
                                                                  instance_uuid)
          for bdm in bdms:
-@@ -1497,12 +1553,12 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -1497,12 +1554,12 @@ class ComputeManager(manager.SchedulerDependentManager):
                  self.volume_api.delete(context, volume)
              # NOTE(vish): bdms will be deleted on instance destroy
  
@@ -1116,7 +1117,7 @@ index e863e73..8483771 100644
          # NOTE(vish): We have already deleted the instance, so we have
          #             to ignore problems cleaning up the volumes. It would
          #             be nice to let the user know somehow that the volume
-@@ -1531,7 +1587,7 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -1531,7 +1588,7 @@ class ComputeManager(manager.SchedulerDependentManager):
  
      @exception.wrap_exception(notifier=notifier, publisher_id=publisher_id())
      @wrap_instance_fault
@@ -1125,7 +1126,7 @@ index e863e73..8483771 100644
          """Terminate an instance on this host.  """
          # Note(eglynn): we do not decorate this action with reverts_task_state
          # because a failure during termination should leave the task state as
-@@ -1542,9 +1598,9 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -1542,9 +1599,9 @@ class ComputeManager(manager.SchedulerDependentManager):
          elevated = context.elevated()
  
          @utils.synchronized(instance['uuid'])
@@ -1137,7 +1138,7 @@ index e863e73..8483771 100644
              except exception.InstanceTerminationFailure as error:
                  msg = _('%s. Setting instance vm_state to ERROR')
                  LOG.error(msg % error, instance=instance)
-@@ -1552,7 +1608,7 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -1552,7 +1609,7 @@ class ComputeManager(manager.SchedulerDependentManager):
              except exception.InstanceNotFound as e:
                  LOG.warn(e, instance=instance)
  
@@ -1146,7 +1147,7 @@ index e863e73..8483771 100644
  
      @exception.wrap_exception(notifier=notifier, publisher_id=publisher_id())
      @reverts_task_state
-@@ -1724,7 +1780,7 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -1724,7 +1781,7 @@ class ComputeManager(manager.SchedulerDependentManager):
          network_info = self._get_instance_nw_info(context, instance)
  
          block_device_info = self._get_instance_volume_block_device_info(
@@ -1155,7 +1156,7 @@ index e863e73..8483771 100644
  
          try:
              self.driver.reboot(instance, self._legacy_nw_info(network_info),
-@@ -2500,7 +2556,12 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -2500,7 +2557,12 @@ class ComputeManager(manager.SchedulerDependentManager):
                                  self._legacy_nw_info(network_info),
                                  block_device_info)
  
@@ -1169,7 +1170,7 @@ index e863e73..8483771 100644
              if bdms:
                  connector = self.driver.get_volume_connector(instance)
                  for bdm in bdms:
-@@ -2594,9 +2655,14 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -2594,9 +2656,14 @@ class ComputeManager(manager.SchedulerDependentManager):
              else:
                  image_meta = self._check_image_size(context, instance)
  
@@ -1185,7 +1186,7 @@ index e863e73..8483771 100644
  
              if bdms:
                  connector = self.driver.get_volume_connector(instance)
-@@ -2878,6 +2944,23 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -2878,6 +2945,23 @@ class ComputeManager(manager.SchedulerDependentManager):
      @exception.wrap_exception(notifier=notifier, publisher_id=publisher_id())
      @reverts_task_state
      @wrap_instance_fault
@@ -1209,7 +1210,7 @@ index e863e73..8483771 100644
      def reserve_block_device_name(self, context, instance, device):
  
          @utils.synchronized(instance['uuid'])
-@@ -2892,6 +2975,178 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -2892,6 +2976,178 @@ class ComputeManager(manager.SchedulerDependentManager):
              return result
          return do_reserve()
  
@@ -1388,7 +1389,7 @@ index e863e73..8483771 100644
      @exception.wrap_exception(notifier=notifier, publisher_id=publisher_id())
      @reverts_task_state
      @wrap_instance_fault
-@@ -2956,6 +3211,52 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -2956,6 +3212,52 @@ class ComputeManager(manager.SchedulerDependentManager):
              'no_device': None}
          self.db.block_device_mapping_update_or_create(context, values)
  
@@ -1441,7 +1442,7 @@ index e863e73..8483771 100644
      def _detach_volume(self, context, instance, bdm):
          """Do the actual driver detach using block device mapping."""
          mp = bdm['device_name']
-@@ -3154,6 +3455,10 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -3154,6 +3456,10 @@ class ComputeManager(manager.SchedulerDependentManager):
                   instance=instance_ref)
  
          # Detaching volumes.
@@ -1452,7 +1453,7 @@ index e863e73..8483771 100644
          for bdm in self._get_instance_volume_bdms(ctxt, instance_ref['uuid']):
              # NOTE(vish): We don't want to actually mark the volume
              #             detached, or delete the bdm, just remove the
-@@ -3282,12 +3587,16 @@ class ComputeManager(manager.SchedulerDependentManager):
+@@ -3282,12 +3588,16 @@ class ComputeManager(manager.SchedulerDependentManager):
          self.network_api.setup_networks_on_host(context, instance_ref,
                                                           self.host)
  
