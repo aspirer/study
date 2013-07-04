@@ -1,0 +1,109 @@
+diff --git a/qga/commands-posix.c b/qga/commands-posix.c
+index e199738..747433c 100644
+--- a/qga/commands-posix.c
++++ b/qga/commands-posix.c
+@@ -19,8 +19,10 @@
+ #include <errno.h>
+ #include <fcntl.h>
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <string.h>
+ #include <sys/stat.h>
++#include <sys/statvfs.h>
+ #include <inttypes.h>
+ #include "qga/guest-agent-core.h"
+ #include "qga-qmp-commands.h"
+@@ -1467,6 +1469,36 @@ void qmp_guest_fstrim(bool has_minimum, int64_t minimum, Error **err)
+ }
+ #endif
+ 
++GuestFileSystemStatistics *qmp_guest_get_statvfs(const char *path, Error **errp)
++{
++    int ret;
++    GuestFileSystemStatistics *fs_stat;
++    struct statvfs *buf;
++    buf = g_malloc0(sizeof(struct statvfs));
++
++
++    ret = statvfs(path, buf);
++    if (ret < 0) {
++       error_setg_errno(errp, errno, "Failed to get statvfs");
++       return NULL;
++    }
++
++    fs_stat = g_malloc0(sizeof(GuestFileSystemStatistics));
++    fs_stat->f_bsize = buf->f_bsize;
++    fs_stat->f_frsize = buf->f_frsize;
++    fs_stat->f_blocks = buf->f_blocks;
++    fs_stat->f_bfree = buf->f_bfree;
++    fs_stat->f_bavail = buf->f_bavail;
++    fs_stat->f_files = buf->f_files;
++    fs_stat->f_ffree = buf->f_ffree;
++    fs_stat->f_favail = buf->f_favail;
++    fs_stat->f_fsid = buf->f_fsid;
++    fs_stat->f_flag = buf->f_flag;
++    fs_stat->f_namemax = buf->f_namemax;
++
++    return fs_stat;
++}
++
+ /* register init/cleanup routines for stateful command groups */
+ void ga_command_state_init(GAState *s, GACommandState *cs)
+ {
+diff --git a/qga/qapi-schema.json b/qga/qapi-schema.json
+index 7155b7a..a071c3f 100644
+--- a/qga/qapi-schema.json
++++ b/qga/qapi-schema.json
+@@ -638,3 +638,52 @@
+ { 'command': 'guest-set-vcpus',
+   'data':    {'vcpus': ['GuestLogicalProcessor'] },
+   'returns': 'int' }
++
++##
++# @GuestFileSystemStatistics:
++#
++# Information about guest file system statistics.
++#
++# @f_bsize: file system block size.
++#
++# @f_frsize: fragment size.
++#
++# @f_blocks: size of fs in f_frsize units.
++#
++# @f_bfree: free blocks.
++#
++# @f_bavail: free blocks for non-root.
++#
++# @f_files: inodes.
++#
++# @f_ffree: free inodes.
++#
++# @f_favail: free inodes for non-root.
++#
++# @f_fsid: file system id.
++#
++# @f_flag: mount flags
++#
++# @f_namemax: maximum filename length.
++#
++# Since 1.5.10(NetEase)
++##
++{ 'type': 'GuestFileSystemStatistics',
++  'data': { 'f_bsize': 'int', 'f_frsize': 'int', 'f_blocks': 'int',
++            'f_bfree': 'int', 'f_bavail': 'int', 'f_files': 'int',
++            'f_ffree': 'int', 'f_favail': 'int', 'f_fsid': 'int',
++            'f_flag': 'int', 'f_namemax': 'int'} }
++
++##
++# @guest-get-statvfs:
++#
++# Get the information about guest file system statistics by statvfs.
++#
++# Returns: @GuestFileSystemStatistics.
++#
++# Since 1.5.10(NetEase)
++##
++{ 'command': 'guest-get-statvfs',
++  'data':    { 'path': 'str' },
++  'returns': 'GuestFileSystemStatistics' }
++

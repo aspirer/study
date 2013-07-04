@@ -5,8 +5,9 @@ import json
 import select
 import socket
 
-sock_file = "/var/lib/libvirt/qemu/instance-000004e8.ctl"
+sock_file = "/var/lib/libvirt/qemu/test.agent"
 
+import ipdb;ipdb.set_trace()
 READ_LEN = 1024
 read_file = "/proc/cpuinfo"
 send_cmds = [{"execute": "guest-file-open", "arguments": {"path": read_file, "mode": "r"}},
