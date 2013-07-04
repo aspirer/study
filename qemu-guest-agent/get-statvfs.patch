@@ -1,19 +1,16 @@
 diff --git a/qga/commands-posix.c b/qga/commands-posix.c
-index e199738..747433c 100644
+index e199738..2f42a2f 100644
 --- a/qga/commands-posix.c
 +++ b/qga/commands-posix.c
-@@ -19,8 +19,10 @@
- #include <errno.h>
- #include <fcntl.h>
+@@ -21,6 +21,7 @@
  #include <stdio.h>
-+#include <stdlib.h>
  #include <string.h>
  #include <sys/stat.h>
 +#include <sys/statvfs.h>
  #include <inttypes.h>
  #include "qga/guest-agent-core.h"
  #include "qga-qmp-commands.h"
-@@ -1467,6 +1469,36 @@ void qmp_guest_fstrim(bool has_minimum, int64_t minimum, Error **err)
+@@ -1467,6 +1468,36 @@ void qmp_guest_fstrim(bool has_minimum, int64_t minimum, Error **err)
  }
  #endif
  
