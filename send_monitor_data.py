@@ -2,7 +2,7 @@
 
 '''
 Created on 2012-07-23
-Updated on 2013-04-19
+Updated on 2013-07-12
 
 @author: hzyangtk@corp.netease.com
 '''
@@ -82,6 +82,27 @@ def get_metadata_from_nova():
         raise Exception()
     meta_data_dict = json.loads(meta_data)
     return meta_data_dict
+
+
+def get_uuid():
+    '''
+        Get uuid of this virtual machine
+    '''
+    if os.path.exists(META_PATH):
+        meta_file_read = open(META_PATH, 'r')
+        temp = meta_file_read.read()
+        meta_file_read.close()
+        if temp:
+            metadata = json.loads(temp)
+        else:
+            raise Exception()
+    else:
+        metadata = get_metadata_from_nova()
+        store_metadata(metadata)
+    uuid = metadata.get('uuid')
+    if uuid is None:
+        raise Exception()
+    return uuid
 
 
 def store_metadata(metadata):
@@ -183,19 +204,33 @@ def handle_metadata(metadata_dict):
 
 def notify_platform_partition_change(disk_partition_info):
     '''
-        notify platform when partition changed.
+        notify platform when partition changed only when service supports
+        diskPartition metric.
 
         :param disk_partition_info: {'sys':['vda1'],
                                      'logic':['vda1', 'vdb1', 'dm-0']}
     '''
     try:
         metadata_dict = read_info_file()
+        service = metadata_dict.get('service')
+        resource_type = metadata_dict.get('resource_type')
+        setting_root = ElementTree.parse(XML_PATH)
+        setting_services = setting_root.findall('service')
+        metric_types = []
+        for s in setting_services:
+            if (service == s.attrib.get('name') and
+                    resource_type == s.attrib.get('resource_type')):
+                metric_types = s.findall('metric')
+
+        metrics = [m.attrib.get('name') for m in metric_types]
+        if 'diskPartition' not in metrics:
+            return False
+
         request_uri = '/rest/V1/nvs/updatePartitionInfo'
         system_partitions = ','.join(disk_partition_info['sys'])
         logic_partitions = ','.join(disk_partition_info['logic'])
         # partition dimension is like openstack=1.1.1.1 or RDS=123456
-        parti_dimension = metadata_dict.get('service') + '=' \
-                            + get_ip_by_ifname(NET_CARD_LIST[0])
+        parti_dimension = metadata_dict.get('service') + '=' + get_uuid()
         send_request = SendRequest(metadata_dict=metadata_dict,
                                    request_uri=request_uri,
                                    system_partitions=system_partitions,
@@ -208,14 +243,6 @@ def notify_platform_partition_change(disk_partition_info):
             return False
     except Exception:
         return False
-
-
-def get_ip_by_ifname(ifname):
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    ip = socket.inet_ntoa(fcntl.ioctl(s.fileno(), 0x8915,  # SIOCGIFADDR
-                                      struct.pack('256s', ifname[:15])
-                                      )[20:24])
-    return ip
 
 
 class GetSystemUsage(object):
@@ -326,7 +353,11 @@ class GetSystemUsage(object):
                     mount = mount.split()
                     partition = os.path.realpath(mount[0]).rsplit('/')[-1]
                     target = mount[1]
-                    mounted_disks[partition] = target
+                    if (partition not in mounted_disks and
+                                    target not in mounted_disks.values()
+                                    or (target == '/' and
+                                        '/' not in mounted_disks.values())):
+                        mounted_disks[partition] = target
             return mounted_disks
 
         def _get_fs_info(path):
@@ -620,7 +651,7 @@ class DataFormater(object):
         if metadata_dict['service'] == 'openstack' or \
                         metadata_dict['service'] == 'NVS':
             # for openstack resource_id is store VM ip (eth0)
-            identify_id = get_ip_by_ifname(NET_CARD_LIST[0])
+            identify_id = get_uuid()
         else:
             identify_id = metadata_dict['resource_id']
 
