@@ -5,7 +5,7 @@ import json
 import select
 import socket
 
-sock_file = "/var/lib/libvirt/qemu/test.agent"
+sock_file = "/tmp/foo.sock"
 
 import ipdb;ipdb.set_trace()
 READ_LEN = 1024
