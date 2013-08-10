@@ -34,7 +34,7 @@ Data structure of instances cache:
 }
 """
 
-instances_path = "/var/lib/nova/instances/"
+
 # libvirt_libdir = "/var/lib/libvirt/qemu/"
 TOKEN = None
 TENANT_ID = None
