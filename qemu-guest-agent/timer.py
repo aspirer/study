@@ -7,16 +7,16 @@ from threading import Timer
 i = 1
 r = {"a": "b", "c": "d"}
 RUN = True
-
+l1 = threading.RLock()
 class th1(object):
-    def __init__(self, delay, l):
+    def __init__(self, delay):
         self.delay = delay
-        self.l = l
+        #self.l = l
         #self.r = r
 
     def func1(self):
-
-        with self.l:
+        global l1
+        with l1:
             global i
             global r
             lr = len(r)
@@ -33,8 +33,8 @@ class th1(object):
 
 
     def func2(self):
-
-        with self.l:
+        global l1
+        with l1:
             global i
             global r
             if len(r):
@@ -62,14 +62,14 @@ class th1(object):
 
 
 if __name__ == "__main__":
-    l1 = threading.RLock()
+
     #l2 = threading.RLock()
     d1 = 0
     d2 = 1
 
     # global R
 
-    TH1 = th1(d1, l1)
+    TH1 = th1(d1)
 
 
     TH1.start()

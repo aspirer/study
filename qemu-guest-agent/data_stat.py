@@ -10,8 +10,9 @@ import instance
 import sender
 
 RUN_DC = True
-monitor_delay = 3
-read_file_time_out = 1
+monitor_delay = 1
+# `must` larger than 5s, default timeout of libvirt checking qga status is 5s
+read_file_time_out = 6
 temp_file_timeout = 30
 READ_BUF_LEN = 1024
 PERIOD_TIME = 60
@@ -113,7 +114,7 @@ class GetSystemUsage(object):
                 print "get file handle failed"
                 handle = None
         else:
-            print "open guest file %s by qga failed, exception: %s" % (file, e)
+            print "open guest file %s by qga failed" % file
             handle = None
 
         if not handle:
@@ -261,6 +262,7 @@ class GetSystemUsage(object):
                 Get mounted disks/partitions from /proc/mounts.
                 @return: partition:target dict: {'vda1': '/', 'dm-0': '/mnt'}
             '''
+            # xxxx how to get real_path
             mounted_disks = {}
             mounts_file = self._read_file_from_guest('/proc/mounts')
             if mounts_file:
@@ -290,6 +292,9 @@ class GetSystemUsage(object):
                      :used: How much space is used (in bytes)
                      :total: How big the filesystem is (in bytes)
             """
+            def byte_to_mb(v):
+                return (float(v) / 1024.0 / 1024.0)
+
             fs_info = {'total': 0.0,
                        'free': 0.0,
                        'used': 0.0}
@@ -308,12 +313,10 @@ class GetSystemUsage(object):
                 print "get statvfs failed, uuid: %s" % self.domain.UUIDString()
                 return fs_info
 
-            fs_info['total'] = (hddinfo['f_frsize'] * hddinfo['f_blocks'] /
-                                1024 / 1024)
-            fs_info['free'] = (hddinfo['f_frsize'] * hddinfo['f_bavail'] /
-                                1024 / 1024)
-            fs_info['used'] = (hddinfo['f_frsize'] * (hddinfo['f_blocks'] -
-                                    hddinfo['f_bfree']) / 1024 / 1024)
+            fs_info['total'] = byte_to_mb(hddinfo['f_frsize'] * hddinfo['f_blocks'])
+            fs_info['free'] = byte_to_mb(hddinfo['f_frsize'] * hddinfo['f_bavail'])
+            fs_info['used'] = byte_to_mb(hddinfo['f_frsize'] * (hddinfo['f_blocks'] -
+                                    hddinfo['f_bfree']))
             return fs_info
 
         def _get_patition_info(disks, total_disk_info):
@@ -323,7 +326,7 @@ class GetSystemUsage(object):
                 free = fs_info['free']
                 used = fs_info['used']
                 total = fs_info['total']
-                usage = round(used / total * 100, 2)
+                usage = round(used * 100 / total, 2)
                 total_disk_info['disk_partition_data'][partition] = {
                                         'avail_capacity': free,
                                         'partition_usage': usage
@@ -707,7 +710,9 @@ class MonitorThread(BaseThread):
         monitor_domains = self._update_instances()
         print "------start monitor ", time.asctime()
         for dom in monitor_domains:
-
+            if not dom.isActive():
+                print "domain is not active %s" % dom.UUIDString()
+                continue
             try:
                 get_system_usage = GetSystemUsage(dom, self.helper)
             except (IOError, AttributeError, ValueError):

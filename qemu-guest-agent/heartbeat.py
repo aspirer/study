@@ -9,7 +9,8 @@ import sender
 
 RUN_HB = True
 heartbeat_delay = 5
-heartbeat_cmd_timeout = 1
+# `must` larger than 5s, default timeout of libvirt checking qga status is 5s
+heartbeat_cmd_timeout = 6
 
 class HeartBeatThread(BaseThread):
     def __init__(self):
@@ -27,6 +28,9 @@ class HeartBeatThread(BaseThread):
         print "-----heartbeat start: ", time.asctime()
         domains = self.helper.list_all_domains()
         for dom in domains:
+            if not dom.isActive():
+                print "domain is not active %s" % dom.UUIDString()
+                continue
             heartbeat_cmd = json.dumps({"execute": "guest-sync",
                                     "arguments": {"id": long(time.time())}})
             uuid = dom.UUIDString()

@@ -2,12 +2,12 @@
 import libvirt_qemu
 from libvirt_qemu import libvirt
 import uuid
-
+import time
 import threading
 
 _LIBVIRT_CONN = libvirt.open(None)
 
-LOCK = threading.RLock()
+CONN_LOCK = threading.RLock()
 
 def is_uuid_like(val):
     """Returns validation of a value as a UUID.
@@ -58,8 +58,8 @@ class LibvirtQemuHelper(object):
             raise
 
     def list_all_domains(self):
-        global LOCK
-        with LOCK:
+        global CONN_LOCK
+        with CONN_LOCK:
             if not self._test_conn():
                 try:
                     self._get_conn()
@@ -102,5 +102,5 @@ class LibvirtQemuHelper(object):
         try:
             return libvirt_qemu.qemuAgentCommand(domain, cmd, timeout, flags)
         except libvirt.libvirtError as e:
-            print "run qga cmd %s cmd error, uuid: %s, exception: %s" % (cmd, uuid, e)
+            print "run qga cmd %s cmd error, uuid: %s, exception: %s" % (cmd, domain.UUIDString(), e)
             return None
