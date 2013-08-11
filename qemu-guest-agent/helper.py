@@ -1,4 +1,4 @@
-﻿
+
 import libvirt_qemu
 from libvirt_qemu import libvirt
 import uuid
@@ -66,7 +66,7 @@ class LibvirtQemuHelper(object):
                 except libvirt.libvirtError as e:
                     print "get connection to libvirt failed, exception: %s" % e
                     return []
-            try:            
+            try:
                 return self._conn.listAllDomains()
             except libvirt.libvirtError as e:
                 print "get all domain ids failed, exception: %s" % e
@@ -98,5 +98,8 @@ class LibvirtQemuHelper(object):
 
     @staticmethod
     def exec_qga_command(domain, cmd, timeout=1, flags=0):
-        return libvirt_qemu.qemuAgentCommand(domain, cmd, timeout, flags)
-
+        try:
+            return libvirt_qemu.qemuAgentCommand(domain, cmd, timeout, flags)
+        except libvirt.libvirtError as e:
+            print "run qga cmd %s cmd error, uuid: %s, exception: %s" % (cmd, uuid, e)
+            return None

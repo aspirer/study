@@ -1,5 +1,7 @@
-﻿
+
+import base64
 import os
+
 from libvirt_qemu import libvirt
 import time
 from base_thread import BaseThread
@@ -9,8 +11,13 @@ import sender
 RUN_DC = True
 enable_monitor = True
 monitor_delay = 10
+read_file_time_out = 1
+READ_BUF_LEN = 1024
+PERIOD_TIME = 60
+NET_CARD_LIST = ['eth0', ]
 
 instances_path = "/var/lib/nova/instances/"
+
 
 '''
 Get system resources usage include disk, network, cpu, memory.
@@ -20,50 +27,130 @@ Disk: get disk read/write data((KB)), requests and used delay(ms).
 Network: get network I/O datas(bytes) and vm ip.
 '''
 class GetSystemUsage(object):
-    def __init__(self, domain):
-        self.dom = domain
-        self.temp = {
-            'total_cpu_time': 0,
-            'last_cpu_idle_time': 0,
-            'disk_read_request': 0,
-            'disk_write_request': 0,
-            'disk_read': 0,
-            'disk_write': 0,
-            'disk_read_delay': 0,
-            'disk_write_delay': 0,
-            'network_receive_bytes': 0,
-            'network_transfer_bytes': 0,
-            'disk_partition_info': {
+    def __init__(self, domain, helper):
+        self.domain = domain
+        self.helper = helper
 
-            },
-            'timestamp': 0
-        }
-        
         global instances_path
-        info_file = instances_path + self.dom.name() + "info"
-        if not os.path.exists(info_file):
-            info_file = instances_path + self.dom.UUIDString() + "info"
-        
-        with open(info_file) as f:
+        self.instance_dir = instances_path + self.domain.name()
+        if not os.path.exists(self.instance_dir):
+            self.instance_dir = instances_path + self.domain.UUIDString()
+
+        info_file = self.instance_dir + "info"
+        with open(info_file, 'r') as f:
             self.info = json.loads(f.read())
+
+        temp_file = self.instance_dir + "temp"
+        if os.path.exists(temp_file):
+            with open(temp_file, 'r') as f:
+                self.temp = json.loads(f.read())
+            print "load temp file"
+        else:
+            print "init temp file"
+            self.temp = {
+                        'total_cpu_time': 0L,
+                        'last_cpu_idle_time': 0L,
+                        'disk_read_request': 0L,
+                        'disk_write_request': 0L,
+                        'disk_read': 0L,
+                        'disk_write': 0L,
+                        'disk_read_delay': 0,
+                        'disk_write_delay': 0,
+                        'network_receive_bytes': 0L,
+                        'network_transfer_bytes': 0L,
+                        'disk_partition_info': {},
+                        'timestamp': 0L
+                    }
+
+    def save_temp(self):
+        print "save temp data of instance %s: %s" % (self.domain.UUIDString(), self.temp)
+        with open(self.instance_dir + "temp", 'w') as f:
+            f.write(json.dumps(self.temp))
+
+    """
+	"return": {
+		"count": 755,
+		"buf-b64": "Y3B1ICA0OTYxIDAgNTQwNiA1MzQ4MT...",
+		"eof": true
+	}
+    """
+    def _read_file_from_guest(self, file, mode='r', read_eof=False):
+        global read_file_time_out
+        cmd_open = json.dumps({"execute": "guest-file-open",
+                                 "arguments": {"path": file, "mode": mode}})
+
+        response = self.helper.exec_qga_command(self.domain, cmd_open,
+                                                timeout=read_file_time_out)
+        if response:
+            print "open file response: %s" % response
+            try:
+                handle = json.loads(response)['return']
+            except (ValueError, KeyError, TypeError):
+                print "get file handle failed"
+                handle = None
+        else:
+            print "open guest file %s by qga failed, exception: %s" % (file, e)
+            handle = None
+
+        if not handle:
+            return None
+
+        global READ_BUF_LEN
+        cmd_read = json.dumps({"execute": "guest-file-read",
+                               "arguments": {"handle": handle,
+                                             "count": READ_BUF_LEN}})
+        read_file_b64 = None
+        eof = False
+        while not eof:
+            response = self.helper.exec_qga_command(self.domain, cmd_read,
+                                                    timeout=read_file_time_out)
+            if response:
+                print "read file response: %s" % response
+                try:
+                    if not read_eof:
+                        # don't need to read all file contents
+                        eof = True
+                    else:
+                        eof = json.loads(response)['return']['eof']
+                    read_file_b64 = json.loads(response)['return']['buf-b64']
+                except (ValueError, KeyError, TypeError):
+                    print "get file handle failed"
+                    read_file_b64 = None
+                    break
+            else:
+                print "open guest file %s by qga failed, exception: %s" % (file, e)
+                read_file_b64 = None
+                break
+
+        cmd_close = json.dumps({"execute": "guest-file-close",
+                                "arguments": {"handle": handle}})
+        self.helper.exec_qga_command(self.domain, cmd_close,
+                                    timeout=read_file_time_out)
+
+        if not read_file_b64:
+            return None
+
+        try:
+            return base64.decodestring(read_file_b64)
+        except binascii.Error as e:
+            print "base64 decode failed, exception: %s" % e
+            return None
 
     def _get_cpu_usage_dict(self):
         '''
             Get CPU usage(percent) by vmstat command.
             @return: {'cpu_usage': 0.0}
         '''
-        cpu_path = '/proc/stat'
-        if os.path.exists(cpu_path):
-            cpu_file_read = open(cpu_path, 'r')
-            cpu_read_line = cpu_file_read.readline()
-            cpu_file_read.close()
+        cpu_stat = self._read_file_from_guest('/proc/stat')
+        if cpu_stat:
+            cpu_read_line = cpu_stat.splitlines()[0]
             cpu_infos = cpu_read_line.split()[1:-1]
             total_cpu_time = 0L
             for cpu_info in cpu_infos:
                 total_cpu_time += long(cpu_info)
-            last_cpu_time = TEMP_DATA['total_cpu_time']
+            last_cpu_time = ['total_cpu_time']
             cpu_idle_time = long(cpu_infos[3])
-            last_cpu_idle_time = TEMP_DATA['last_cpu_idle_time']
+            last_cpu_idle_time = self.temp['last_cpu_idle_time']
             total_cpu_period = float(total_cpu_time - last_cpu_time)
             idle_cpu_period = float(cpu_idle_time - last_cpu_idle_time)
 
@@ -73,9 +160,10 @@ class GetSystemUsage(object):
                 idle_usage = idle_cpu_period / total_cpu_period * 100
                 cpu_usage = round(100 - idle_usage, 2)
 
-            TEMP_DATA['total_cpu_time'] = total_cpu_time
-            TEMP_DATA['last_cpu_idle_time'] = cpu_idle_time
+            self.temp['total_cpu_time'] = total_cpu_time
+            self.temp['last_cpu_idle_time'] = cpu_idle_time
         else:
+            print "cpu_usage get failed, uuid: %s" % self.domain.UUIDString()
             cpu_usage = 0.0
         return {'cpu_usage': cpu_usage}
 
@@ -84,10 +172,13 @@ class GetSystemUsage(object):
             Get loadavg info from /proc/loadavg.
             @return: {'loadavg_5': 4.32}
         '''
-        with open('/proc/loadavg', 'r') as loadavg_file_read:
-            loadavg_info_line = loadavg_file_read.readline()
-        loadavg_5 = float(loadavg_info_line.split()[1])
-
+        loadavg_file_read = self._read_file_from_guest('/proc/loadavg')
+        if loadavg_file_read:
+            loadavg_info_line = loadavg_file_read.splitlines()[0]
+            loadavg_5 = float(loadavg_info_line.split()[1])
+        else:
+            print "loadavg_5 get failed, uuid: %s" % self.domain.UUIDString()
+            loadavg_5 = 0.0
         return {'loadavg_5': loadavg_5}
 
     def _get_memory_usage_dict(self):
@@ -99,22 +190,29 @@ class GetSystemUsage(object):
             used_memory = MemTotal - free_memory
             memory_usage_rate = used_memory * 100 / MemTotal
         '''
-        with open('/proc/meminfo', 'r') as mem_file_read:
-            mem_info_lines = mem_file_read.readlines()
+        mem_usage = {
+            'total_memory': 0,
+            'free_memory': 0,
+            'used_memory': 0,
+            'memory_usage_rate': 0
+        }
+        mem_file_read = self._read_file_from_guest('/proc/meminfo')
+        if mem_file_read:
+            mem_info_lines = mem_file_read.splitlines()
+        else:
+            print "mem_usage get failed, uuid: %s" % self.domain.UUIDString()
+            return mem_usage
 
-        total_memory = long(mem_info_lines[0].split()[1]) / 1024
-        free_memory = (long(mem_info_lines[1].split()[1])
+        mem_usage['total_memory'] = long(mem_info_lines[0].split()[1]) / 1024
+        mem_usage['free_memory'] = (long(mem_info_lines[1].split()[1])
                        + long(mem_info_lines[2].split()[1])
                        + long(mem_info_lines[3].split()[1])) / 1024
-        used_memory = total_memory - free_memory
-        memory_usage_rate = (used_memory * 100) / total_memory
+        mem_usage['used_memory'] = (mem_usage['total_memory'] -
+                                    mem_usage['free_memory'])
+        mem_usage['memory_usage_rate'] = ((mem_usage['used_memory'] * 100) /
+                                            mem_usage['total_memory'])
 
-        return {
-            'total_memory': total_memory,
-            'free_memory': free_memory,
-            'used_memory': used_memory,
-            'memory_usage_rate': memory_usage_rate
-        }
+        return mem_usage
 
     def _get_disk_data(self):
         '''
@@ -139,15 +237,24 @@ class GetSystemUsage(object):
                 Get mounted disks/partitions from /proc/mounts.
                 @return: partition:target dict: {'vda1': '/', 'dm-0': '/mnt'}
             '''
-            with open('/proc/mounts', 'r') as f:
-                mounts = f.readlines()
             mounted_disks = {}
+            mounts_file = self._read_file_from_guest('/proc/mounts')
+            if mounts_file:
+                mounts = mounts_file.splitlines()
+            else:
+                print "mounted disks get failed, uuid: %s" % self.domain.UUIDString()
+                return mounted_disks
             for mount in mounts:
                 if mount.startswith('/dev/'):
                     mount = mount.split()
                     partition = os.path.realpath(mount[0]).rsplit('/')[-1]
                     target = mount[1]
-                    mounted_disks[partition] = target
+                    if (partition not in mounted_disks and
+                                    target not in mounted_disks.values()
+                                    or (target == '/' and
+                                        '/' not in mounted_disks.values())):
+                        mounted_disks[partition] = target
+
             return mounted_disks
 
         def _get_fs_info(path):
@@ -159,13 +266,31 @@ class GetSystemUsage(object):
                      :used: How much space is used (in bytes)
                      :total: How big the filesystem is (in bytes)
             """
-            hddinfo = os.statvfs(path)
-            total = hddinfo.f_frsize * hddinfo.f_blocks
-            free = hddinfo.f_frsize * hddinfo.f_bavail
-            used = hddinfo.f_frsize * (hddinfo.f_blocks - hddinfo.f_bfree)
-            return {'total': float(total) / 1024 / 1024,
-                    'free': float(free) / 1024 / 1024,
-                    'used': float(used) / 1024 / 1024}
+            fs_info = {'total': 0.0,
+                       'free': 0.0,
+                       'used': 0.0}
+            cmd_statvfs = json.dumps({"execute": "guest-get-statvfs",
+                                      "arguments": {"path": path}})
+            response = self.helper.exec_qga_command(self.domain, cmd_statvfs,
+                                                    timeout=read_file_time_out)
+            if response:
+                print "open file response: %s" % response
+                try:
+                    hddinfo = json.loads(response)['return']
+                except (ValueError, KeyError, TypeError):
+                    print "get statvfs failed, uuid: %s" % self.domain.UUIDString()
+                    hddinfo = None
+            else:
+                print "get statvfs failed, uuid: %s" % self.domain.UUIDString()
+                return fs_info
+
+            fs_info['total'] = (hddinfo['f_frsize'] * hddinfo['f_blocks'] /
+                                1024 / 1024)
+            fs_info['free'] = (hddinfo['f_frsize'] * hddinfo['f_bavail'] /
+                                1024 / 1024)
+            fs_info['used'] = (hddinfo['f_frsize'] * (hddinfo['f_blocks'] -
+                                    hddinfo['f_bfree']) / 1024 / 1024)
+            return fs_info
 
         def _get_patition_info(disks, total_disk_info):
             partitions = {'sys': [], 'logic': []}
@@ -198,8 +323,13 @@ class GetSystemUsage(object):
                 And set the datas into total_disk_info dict.
             '''
             partitions = disks.keys()
-            with open('/proc/diskstats') as diskstats:
-                disk_datas = diskstats.readlines()
+            diskstats = self._read_file_from_guest('/proc/diskstats')
+            if diskstats:
+                disk_datas = diskstats.splitlines()
+            else:
+                print "get diskstats failed, uuid: %s" % self.domain.UUIDString()
+                return
+
             for disk_data in disk_datas:
                 datas = disk_data.split()
                 if datas[2] in partitions:
@@ -224,8 +354,10 @@ class GetSystemUsage(object):
             'disk_partition_data': {}
         }
 
-        _get_patition_info(disks, total_disk_info)
-        _get_disk_data_by_proc(disks, total_disk_info)
+        if disks:
+            _get_patition_info(disks, total_disk_info)
+            _get_disk_data_by_proc(disks, total_disk_info)
+
         return total_disk_info
 
     def _get_disk_usage_rate_dict(self):
@@ -240,29 +372,29 @@ class GetSystemUsage(object):
                                                       'partition_usage': 15}}
                      }
         '''
-        global TEMP_DATA
+        global PERIOD_TIME
         now_disk_data = self._get_disk_data()
         write_request_period_time = now_disk_data['disk_write_request'] \
-                                    - TEMP_DATA['disk_write_request']
+                                    - self.temp['disk_write_request']
         read_request_period_time = now_disk_data['disk_read_request'] \
-                                    - TEMP_DATA['disk_read_request']
+                                    - self.temp['disk_read_request']
         if write_request_period_time == 0:
             write_request_period_time = 1
         if read_request_period_time == 0:
             read_request_period_time = 1
 
         disk_write_rate = float(now_disk_data['disk_write'] - \
-                                TEMP_DATA['disk_write']) / PERIOD_TIME
+                                self.temp['disk_write']) / PERIOD_TIME
         disk_read_rate = float(now_disk_data['disk_read'] - \
-                               TEMP_DATA['disk_read']) / PERIOD_TIME
+                               self.temp['disk_read']) / PERIOD_TIME
         disk_write_request = float(now_disk_data['disk_write_request'] - \
-                TEMP_DATA['disk_write_request']) / PERIOD_TIME
+                self.temp['disk_write_request']) / PERIOD_TIME
         disk_read_request = float(now_disk_data['disk_read_request'] - \
-                TEMP_DATA['disk_read_request']) / PERIOD_TIME
+                self.temp['disk_read_request']) / PERIOD_TIME
         disk_write_delay = float(now_disk_data['disk_write_delay'] - \
-            TEMP_DATA['disk_write_delay']) / float(write_request_period_time)
+            self.temp['disk_write_delay']) / float(write_request_period_time)
         disk_read_delay = float(now_disk_data['disk_read_delay'] - \
-            TEMP_DATA['disk_read_delay']) / float(read_request_period_time)
+            self.temp['disk_read_delay']) / float(read_request_period_time)
         if disk_write_rate < 0 or disk_read_rate < 0 \
                         or disk_write_request < 0 or disk_read_request < 0 \
                         or disk_write_delay < 0 or disk_read_delay < 0:
@@ -286,24 +418,23 @@ class GetSystemUsage(object):
         }
 
         # when partition info changed, notify platform with new partition info
-        last_partition_info = {}
-        is_success = True
-        if ENABLE_PARTITION_MONITOR and \
-                now_disk_data.get('disk_partition_info') \
-                != TEMP_DATA.get('disk_partition_info'):
-            is_success = notify_platform_partition_change(
-                            now_disk_data.get('disk_partition_info', []))
-            if not is_success:
-                last_partition_info = TEMP_DATA['disk_partition_info']
+        #last_partition_info = {}
+        #is_success = True
+        #if now_disk_data.get('disk_partition_info') \
+        #        != self.temp.get('disk_partition_info'):
+            #is_success = notify_platform_partition_change(
+            #                now_disk_data.get('disk_partition_info', []))
+            #if not is_success:
+            #   last_partition_info = self.temp['disk_partition_info']
 
         for key in now_disk_data.keys():
-            if key in TEMP_DATA:
-                TEMP_DATA[key] = now_disk_data[key]
+            if key in self.temp:
+                self.temp[key] = now_disk_data[key]
 
         # FIXME(hzyangtk): here add for don`t record partition info into temp.
         # To do this when partition monitor enable, partition change will occur
-        if not ENABLE_PARTITION_MONITOR or not is_success:
-            TEMP_DATA['disk_partition_info'] = last_partition_info
+        #if not ENABLE_PARTITION_MONITOR or not is_success:
+        #    self.temp['disk_partition_info'] = last_partition_info
 
         return disk_usage_dict
 
@@ -314,14 +445,19 @@ class GetSystemUsage(object):
             Split the grep result and divide it into list.
             @return: ['10.120.0.1', '123', '123']
         '''
+        global NET_CARD_LIST
         receive_bytes = 0L
         transfer_bytes = 0L
         receive_packages = 0L
         transfer_packages = 0L
         # TODO(hzyangtk): When VM has multiple network card, it should monitor
         #                 all the cards but not only eth0.
-        with open('/proc/net/dev', 'r') as net_dev:
-            network_lines = net_dev.readlines()
+        net_devs = self._read_file_from_guest('/proc/net/dev')
+        if net_devs:
+            network_lines = net_devs.splitlines()
+        else:
+            print "get network data failed, uuid: %s" % self.domain.UUIDString()
+            return [receive_bytes, transfer_bytes]
         for network_line in network_lines:
             network_datas = network_line.replace(':', ' ').split()
             try:
@@ -330,7 +466,7 @@ class GetSystemUsage(object):
                     receive_packages += long(network_datas[2])
                     transfer_bytes += long(network_datas[9])
                     transfer_packages += long(network_datas[10])
-            except Exception:
+            except (KeyError, ValueError, IndexError, TypeError):
                 continue
         return [receive_bytes, transfer_bytes]
 
@@ -338,15 +474,16 @@ class GetSystemUsage(object):
         '''
             Assemble dict datas collect from _get_network_flow_data()
             for network flow rate in 60s.
-            Set network flow datas to TEMP_DATA.
+            Set network flow datas to self.temp.
             @return: {
                       'ip': '10.120.0.1',
                       'receive_rate': 0.0,
                       'transfer_rate': 0.0
                     }
         '''
-        old_receive_bytes = TEMP_DATA['network_receive_bytes']
-        old_transfer_bytes = TEMP_DATA['network_transfer_bytes']
+        global PERIOD_TIME
+        old_receive_bytes = self.temp['network_receive_bytes']
+        old_transfer_bytes = self.temp['network_transfer_bytes']
         now_receive_bytes, now_transfer_bytes = \
                                     self._get_network_flow_data()
         receive_rate = float(now_receive_bytes - old_receive_bytes) \
@@ -361,8 +498,8 @@ class GetSystemUsage(object):
                 'receive_rate': receive_rate,
                 'transfer_rate': transfer_rate
         }
-        TEMP_DATA['network_receive_bytes'] = now_receive_bytes
-        TEMP_DATA['network_transfer_bytes'] = now_transfer_bytes
+        self.temp['network_receive_bytes'] = now_receive_bytes
+        self.temp['network_transfer_bytes'] = now_transfer_bytes
         return network_info_dict
 
     def get_system_usage_datas(self):
@@ -550,16 +687,23 @@ class MonitorThread(BaseThread):
         monitor_domains = self._update_instances()
         print "------start monitor ", time.asctime()
         for dom in monitor_domains:
-            '''get_system_usage = GetSystemUsage(dom)
+
+            try:
+                get_system_usage = GetSystemUsage(dom, self.helper)
+            except (IOError, AttributeError, ValueError):
+                print "init sys usage failed, info file not found"
+                continue
             all_usage_dict = get_system_usage.get_system_usage_datas()
             get_system_usage.save_temp()
 
-            metadata_dict = read_info_file()
-            metric_datas = DataFormater().format_data(all_usage_dict,
-                                                      metadata_dict)
-            metric_datas_json = json.dumps(metric_datas)
-            send_request = sender.SendRequest(metadata_dict, metric_datas_json)
-            send_request.send_request_to_server()'''
+            print "monitor data of instance %s: %s" % (dom.UUIDString(), all_usage_dict)
+
+            #metadata_dict = read_info_file()
+            #metric_datas = DataFormater().format_data(all_usage_dict,
+            #                                          metadata_dict)
+            #metric_datas_json = json.dumps(metric_datas)
+            #send_request = sender.SendRequest(metadata_dict, metric_datas_json)
+            #send_request.send_request_to_server()
             print "monitor domain %s" % dom.UUIDString()
         print "--------end monitor", time.asctime()
 

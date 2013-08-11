@@ -1,1 +1,1 @@
-﻿RUN = True
+RUN = True

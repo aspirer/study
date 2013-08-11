@@ -1,4 +1,4 @@
-﻿
+
 import json
 import time
 
@@ -32,18 +32,17 @@ class HeartBeatThread(BaseThread):
         print "-----heartbeat start: ", time.asctime()
         domains = self.helper.list_all_domains()
         for dom in domains:
-            self.qga_cmd["arguments"]["id"] = int(time.time())
-            try:
-                uuid = dom.UUIDString()
-                global heartbeat_cmd_timeout
-                result = self.helper.exec_qga_command(dom,
-                                        json.dumps(self.qga_cmd),
-                                        timeout=heartbeat_cmd_timeout)
-                print "qga response: %s" % result
-            except libvirt.libvirtError as e:
-                print "run qga cmd error, uuid: %s, exception: %s" % (uuid, e)
-            else:
+            heartbeat_cmd = json.dumps({"execute": "guest-sync",
+                                        "arguments": {"id": int(time.time())}})
+            uuid = dom.UUIDString()
+            global heartbeat_cmd_timeout
+            response = self.helper.exec_qga_command(dom, heartbeat_cmd,
+                                            timeout=heartbeat_cmd_timeout)
+            print "qga response: %s" % response
+            if response:
                 self.sender.report_heartbeat(uuid)
+            else:
+                print "heartbeat command failed"
         print "-----heartbeat end: ", time.asctime()
 
         self.start()

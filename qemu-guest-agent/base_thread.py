@@ -1,4 +1,4 @@
-﻿
+
 import helper
 from threading import Timer
 
