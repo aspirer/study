@@ -98,6 +98,7 @@ class LibvirtQemuHelper(object):
 
     @staticmethod
     def exec_qga_command(domain, cmd, timeout=1, flags=0):
+        print "going to execute qga cmd %s" % cmd
         try:
             return libvirt_qemu.qemuAgentCommand(domain, cmd, timeout, flags)
         except libvirt.libvirtError as e:

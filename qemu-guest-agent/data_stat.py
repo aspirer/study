@@ -1,5 +1,6 @@
 
 import base64
+import json
 import os
 
 from libvirt_qemu import libvirt
@@ -9,9 +10,9 @@ import instance
 import sender
 
 RUN_DC = True
-enable_monitor = True
-monitor_delay = 10
+monitor_delay = 3
 read_file_time_out = 1
+temp_file_timeout = 30
 READ_BUF_LEN = 1024
 PERIOD_TIME = 60
 NET_CARD_LIST = ['eth0', ]
@@ -30,42 +31,65 @@ class GetSystemUsage(object):
     def __init__(self, domain, helper):
         self.domain = domain
         self.helper = helper
-
         global instances_path
         self.instance_dir = instances_path + self.domain.name()
         if not os.path.exists(self.instance_dir):
             self.instance_dir = instances_path + self.domain.UUIDString()
 
-        info_file = self.instance_dir + "info"
+        info_file = self.instance_dir + "/info"
         with open(info_file, 'r') as f:
             self.info = json.loads(f.read())
 
-        temp_file = self.instance_dir + "temp"
+        print "init temp file"
+        self.temp = {
+                    'total_cpu_time': 0L,
+                    'last_cpu_idle_time': 0L,
+                    'disk_read_request': 0L,
+                    'disk_write_request': 0L,
+                    'disk_read': 0L,
+                    'disk_write': 0L,
+                    'disk_read_delay': 0,
+                    'disk_write_delay': 0,
+                    'network_receive_bytes': 0L,
+                    'network_transfer_bytes': 0L,
+                    'disk_partition_info': {},
+                    'timestamp': 0L
+                }
+
+    def load_temp(self):
+        global temp_file_timeout
+        temp_file = self.instance_dir + "/temp"
         if os.path.exists(temp_file):
-            with open(temp_file, 'r') as f:
-                self.temp = json.loads(f.read())
-            print "load temp file"
+            try:
+                print "loading temp file"
+                with open(temp_file, 'r') as f:
+                    temp_data = json.loads(f.read())
+                elapse = long(time.time()) - temp_data['timestamp']
+                if elapse >= 0 and elapse <= PERIOD_TIME + temp_file_timeout:
+                    for k,v in temp_data.iteritems():
+                        if k in self.temp:
+                            self.temp[k] = v
+                    print "loaded temp file: %s" % self.temp
+                    return True
+                else:
+                    print "temp file time out"
+                    return False
+            except (KeyError, TypeError, AttributeError, ValueError) as e:
+                print "temp file %s read failed, exception: %s" % (temp_file, e)
+                return False
         else:
-            print "init temp file"
-            self.temp = {
-                        'total_cpu_time': 0L,
-                        'last_cpu_idle_time': 0L,
-                        'disk_read_request': 0L,
-                        'disk_write_request': 0L,
-                        'disk_read': 0L,
-                        'disk_write': 0L,
-                        'disk_read_delay': 0,
-                        'disk_write_delay': 0,
-                        'network_receive_bytes': 0L,
-                        'network_transfer_bytes': 0L,
-                        'disk_partition_info': {},
-                        'timestamp': 0L
-                    }
+            print "temp file not found at %s" % temp_file
+            return False
 
     def save_temp(self):
+        temp_file = self.instance_dir + "/temp"
         print "save temp data of instance %s: %s" % (self.domain.UUIDString(), self.temp)
-        with open(self.instance_dir + "temp", 'w') as f:
+        with open(temp_file, 'w') as f:
+            print "saving temp file to %s" % temp_file
+            self.temp['timestamp'] = long(time.time())
             f.write(json.dumps(self.temp))
+            print "saved temp file"
+
 
     """
 	"return": {
@@ -148,7 +172,7 @@ class GetSystemUsage(object):
             total_cpu_time = 0L
             for cpu_info in cpu_infos:
                 total_cpu_time += long(cpu_info)
-            last_cpu_time = ['total_cpu_time']
+            last_cpu_time = self.temp['total_cpu_time']
             cpu_idle_time = long(cpu_infos[3])
             last_cpu_idle_time = self.temp['last_cpu_idle_time']
             total_cpu_period = float(total_cpu_time - last_cpu_time)
@@ -659,11 +683,7 @@ class MonitorThread(BaseThread):
 
     def _run(self):
         global RUN_DC
-        global enable_monitor
-        if enable_monitor:
-            return RUN_DC
-        else:
-            return False
+        return RUN_DC
 
     def _update_instances(self):
         print "ith: 2, ", time.asctime()
@@ -691,19 +711,25 @@ class MonitorThread(BaseThread):
             try:
                 get_system_usage = GetSystemUsage(dom, self.helper)
             except (IOError, AttributeError, ValueError):
-                print "init sys usage failed, info file not found"
+                print "init sys usage failed, info file not found, uuid: %s" % dom.UUIDString()
                 continue
+            temp_ok = get_system_usage.load_temp()
             all_usage_dict = get_system_usage.get_system_usage_datas()
             get_system_usage.save_temp()
 
-            print "monitor data of instance %s: %s" % (dom.UUIDString(), all_usage_dict)
+            if temp_ok:
+                print "monitor data of instance %s: %s" % (dom.UUIDString(), all_usage_dict)
+            else:
+                print "first start or temp file is expired"
 
             #metadata_dict = read_info_file()
-            #metric_datas = DataFormater().format_data(all_usage_dict,
-            #                                          metadata_dict)
-            #metric_datas_json = json.dumps(metric_datas)
-            #send_request = sender.SendRequest(metadata_dict, metric_datas_json)
-            #send_request.send_request_to_server()
+            #metadata_ok = handle_metadata(metadata_dict)
+            #if temp_ok and metadata_ok:
+                #metric_datas = DataFormater().format_data(all_usage_dict,
+                #                                          metadata_dict)
+                #metric_datas_json = json.dumps(metric_datas)
+                #send_request = sender.SendRequest(metadata_dict, metric_datas_json)
+                #send_request.send_request_to_server()
             print "monitor domain %s" % dom.UUIDString()
         print "--------end monitor", time.asctime()
 

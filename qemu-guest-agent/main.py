@@ -11,19 +11,22 @@ import heartbeat
 import data_stat
 
 
-
+enable_heartbeat = True
+enable_monitor = True
 
 
 # main loop for monitor data collecting
 def main():
 
     # create the heartbeat thread
-    heartbeat_thr = heartbeat.HeartBeatThread()
-    heartbeat_thr.start()
+    if enable_heartbeat:
+        heartbeat_thr = heartbeat.HeartBeatThread()
+        heartbeat_thr.start()
 
     # create the monitor data collect thread
-    data_stat_thr = data_stat.MonitorThread()
-    data_stat_thr.start()
+    if enable_monitor:
+        data_stat_thr = data_stat.MonitorThread()
+        data_stat_thr.start()
 
 
 # main entry

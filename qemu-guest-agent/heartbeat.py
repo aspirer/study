@@ -8,7 +8,6 @@ from base_thread import BaseThread
 import sender
 
 RUN_HB = True
-enable_heartbeat = True
 heartbeat_delay = 5
 heartbeat_cmd_timeout = 1
 
@@ -22,18 +21,14 @@ class HeartBeatThread(BaseThread):
 
     def _run(self):
         global RUN_HB
-        global enable_heartbeat
-        if enable_heartbeat:
-            return RUN_HB
-        else:
-            return False
+        return RUN_HB
 
     def serve(self):
         print "-----heartbeat start: ", time.asctime()
         domains = self.helper.list_all_domains()
         for dom in domains:
             heartbeat_cmd = json.dumps({"execute": "guest-sync",
-                                        "arguments": {"id": int(time.time())}})
+                                    "arguments": {"id": long(time.time())}})
             uuid = dom.UUIDString()
             global heartbeat_cmd_timeout
             response = self.helper.exec_qga_command(dom, heartbeat_cmd,
