@@ -5,36 +5,6 @@ import os
 import requests
 
 
-"""
-Data structure of instances cache:
-{
-    "uuid1": {
-        "name1": "instance-name1",
-        "domain1": "domain-in-libvirt",
-        "last_heartbeat": "123457890",
-        "last_monitor": "1235680",
-        "temp": {
-            'total_cpu_time': 0,
-            'last_cpu_idle_time': 0,
-            'disk_read_request': 0,
-            'disk_write_request': 0,
-            'disk_read': 0,
-            'disk_write': 0,
-            'disk_read_delay': 0,
-            'disk_write_delay': 0,
-            'network_receive_bytes': 0,
-            'network_transfer_bytes': 0,
-            'disk_partition_info': {
-
-            },
-            'timestamp': 0
-        }
-    },
-
-}
-"""
-
-
 # libvirt_libdir = "/var/lib/libvirt/qemu/"
 TOKEN = None
 TENANT_ID = None

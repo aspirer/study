@@ -72,30 +72,6 @@ class LibvirtQemuHelper(object):
                 print "get all domain ids failed, exception: %s" % e
                 return []
 
-    def get_domain(self, id):
-        if not id:
-            return None
-
-        if not self._test_conn():
-            try:
-                self._get_conn()
-            except libvirt.libvirtError as e:
-                print "get connection to libvirt failed"
-                return None
-        try:
-            if is_uuid_like(id):
-                domain = self._conn.lookupByUUIDString(id)
-            else:
-                domain = self._conn.lookupByID(id)
-            return domain
-        except libvirt.libvirtError as e:
-            if e.get_error_code() in (libvirt.VIR_ERR_NO_DOMAIN,):
-                # LOG.debug(_('instance not found in libvirt'))
-                print "instance not found in libvirt"
-            else:
-                print "get domain error, exception: %s" % e
-            return None
-
     @staticmethod
     def exec_qga_command(domain, cmd, timeout=1, flags=0):
         print "going to execute qga cmd %s" % cmd

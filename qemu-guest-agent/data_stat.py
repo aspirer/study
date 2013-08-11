@@ -3,6 +3,8 @@ import base64
 import json
 import os
 
+from xml.etree import ElementTree
+
 from libvirt_qemu import libvirt
 import time
 from base_thread import BaseThread
@@ -29,7 +31,7 @@ Disk: get disk read/write data((KB)), requests and used delay(ms).
 Network: get network I/O datas(bytes) and vm ip.
 '''
 class GetSystemUsage(object):
-    def __init__(self, domain, helper):
+    def __init__(self, domain, project_id, helper):
         self.domain = domain
         self.helper = helper
         global instances_path
@@ -40,6 +42,19 @@ class GetSystemUsage(object):
         info_file = self.instance_dir + "/info"
         with open(info_file, 'r') as f:
             self.info = json.loads(f.read())
+        # check info file
+        service = self.info.get('service')
+        ori_user = self.info.get('ori_user', '')
+        aggregation_items = self.info.get('aggregation_items')
+        resource_type = self.info.get('resource_type')
+        if ori_user == '' and service == 'openstack':
+            self.info['ori_user'] = project_id
+        if aggregation_items == None or aggregation_items == '':
+            self.info['aggregation_items'] = {}
+        if service == 'openstack' and resource_type != 'openstack':
+            self.info['resource_type'] = 'openstack'
+
+        print "*******info file %s" % self.info
 
         print "init temp file"
         self.temp = {
@@ -582,7 +597,7 @@ class DataFormater(object):
 
         return metric_datas
 
-    def format_data(self, all_usage_dict, metadata_dict):
+    def format_data(self, all_usage_dict, domain, metadata_dict):
         '''
             Format the collected datas into result and defined format:
             {"metricDatas": [
@@ -602,10 +617,9 @@ class DataFormater(object):
         metric_datas = dict()
         metric_datas['metricDatas'] = list()
 
-        if metadata_dict['service'] == 'openstack' or \
-                        metadata_dict['service'] == 'NVS':
+        if metadata_dict['service'] in ('openstack', 'NVS'):
             # for openstack resource_id is store VM ip (eth0)
-            identify_id = get_uuid()
+            identify_id = domain.UUIDString()
         else:
             identify_id = metadata_dict['resource_id']
 
@@ -613,6 +627,8 @@ class DataFormater(object):
 
         # Read XML settings and set aggregation dimension
         # infos and store metric datas
+        global instances_path
+        XML_PATH = instances_path + domain.name() + "/monitor_setting.xml"
         root = ElementTree.parse(XML_PATH)
         services = root.getiterator("service")
         for service in services:
@@ -631,8 +647,7 @@ class DataFormater(object):
                                 aggregationDimensions += ','
                             aggregationDimensions += ag_name + '=' + \
                                     aggregation_items[ag_name].encode('utf-8')
-                    if metric_type == 'diskPartition' and \
-                                    ENABLE_PARTITION_MONITOR:
+                    if metric_type == 'diskPartition':
                         partition_info = all_usage_dict[metric_type][0]
                         partition_datas = all_usage_dict[metric_type][1]
                         partition_setting = {
@@ -695,7 +710,17 @@ class MonitorThread(BaseThread):
 
         hyper_domains = self.helper.list_all_domains()
         hyper_uuids = [dom.UUIDString() for dom in hyper_domains]
-        monitor_domains = [dom for dom in hyper_domains
+        monitor_domains_with_project_id = []
+        for dom in hyper_domains:
+            dom_uuid = dom.UUIDString()
+            if dom_uuid in db_uuids:
+                project_id = None
+                for inst in db_instances:
+                    if dom_uuid == inst['id']:
+                        project_id = inst['tenant_id']
+                monitor_domains_with_project_id.append((dom, project_id))
+
+        monitor_uuids = [dom.UUIDString() for dom in hyper_domains
                                 if dom.UUIDString() in db_uuids]
         hyper_lost_domains = [uuid for uuid in db_uuids
                                 if uuid not in hyper_uuids]
@@ -703,18 +728,18 @@ class MonitorThread(BaseThread):
                                     if dom.UUIDString() not in db_uuids]
         print "lost instances on the hypervisor: %s" % hyper_lost_domains
         print "residual domains on the hypervisor: %s" % hyper_residual_domains
-        print "monitor domains: %s" % [dom.UUIDString() for dom in monitor_domains]
-        return monitor_domains
+        print "monitor domains: %s" % monitor_uuids
+        return monitor_domains_with_project_id
 
     def serve(self):
-        monitor_domains = self._update_instances()
+        monitor_domains_with_project_id = self._update_instances()
         print "------start monitor ", time.asctime()
-        for dom in monitor_domains:
+        for (dom, project_id) in monitor_domains_with_project_id:
             if not dom.isActive():
                 print "domain is not active %s" % dom.UUIDString()
                 continue
             try:
-                get_system_usage = GetSystemUsage(dom, self.helper)
+                get_system_usage = GetSystemUsage(dom, project_id, self.helper)
             except (IOError, AttributeError, ValueError):
                 print "init sys usage failed, info file not found, uuid: %s" % dom.UUIDString()
                 continue
@@ -724,17 +749,14 @@ class MonitorThread(BaseThread):
 
             if temp_ok:
                 print "monitor data of instance %s: %s" % (dom.UUIDString(), all_usage_dict)
-            else:
-                print "first start or temp file is expired"
-
-            #metadata_dict = read_info_file()
-            #metadata_ok = handle_metadata(metadata_dict)
-            #if temp_ok and metadata_ok:
-                #metric_datas = DataFormater().format_data(all_usage_dict,
-                #                                          metadata_dict)
-                #metric_datas_json = json.dumps(metric_datas)
+                metric_datas = DataFormater().format_data(all_usage_dict,
+                                                    dom, get_system_usage.info)
+                metric_datas_json = json.dumps(metric_datas)
+                print "===========metric_datas_json %s" % metric_datas_json
                 #send_request = sender.SendRequest(metadata_dict, metric_datas_json)
                 #send_request.send_request_to_server()
+            else:
+                print "first start or temp file is expired"
             print "monitor domain %s" % dom.UUIDString()
         print "--------end monitor", time.asctime()
 
