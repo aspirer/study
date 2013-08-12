@@ -47,7 +47,7 @@ def get_all_instances_on_host():
 
         try:
             r = requests.get(api_url, params=params, headers=headers, timeout=3)
-            if r.status_code == 413:
+            if r.status_code == 401:
                 retry += 1
                 _get_token()
             elif r.status_code == 200:

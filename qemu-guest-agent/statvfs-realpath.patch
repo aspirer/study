@@ -1,0 +1,160 @@
+diff -u qemu-1.5.0+dfsg/qga/commands-posix.c qemu-1.5.0+dfsg.new/qga/commands-posix.c
+--- qemu-1.5.0+dfsg/qga/commands-posix.c	2013-05-20 23:34:40.000000000 +0800
++++ qemu-1.5.0+dfsg.new/qga/commands-posix.c	2013-08-12 10:58:40.345451311 +0800
+@@ -21,7 +21,9 @@
+ #include <stdio.h>
+ #include <string.h>
+ #include <sys/stat.h>
++#include <sys/statvfs.h>
+ #include <inttypes.h>
++#include <stdlib.h>
+ #include "qga/guest-agent-core.h"
+ #include "qga-qmp-commands.h"
+ #include "qapi/qmp/qerror.h"
+@@ -1467,6 +1469,76 @@
+ }
+ #endif
+ 
++GuestFileSystemStatistics *qmp_guest_get_statvfs(const char *path, Error **errp)
++{
++    int ret;
++    GuestFileSystemStatistics *fs_stat;
++    struct statvfs *buf;
++    buf = g_malloc0(sizeof(struct statvfs));
++
++    ret = statvfs(path, buf);
++    if (ret < 0) {
++       error_setg_errno(errp, errno, "Failed to get statvfs");
++       return NULL;
++    }
++
++    fs_stat = g_malloc0(sizeof(GuestFileSystemStatistics));
++    fs_stat->f_bsize = buf->f_bsize;
++    fs_stat->f_frsize = buf->f_frsize;
++    fs_stat->f_blocks = buf->f_blocks;
++    fs_stat->f_bfree = buf->f_bfree;
++    fs_stat->f_bavail = buf->f_bavail;
++    fs_stat->f_files = buf->f_files;
++    fs_stat->f_ffree = buf->f_ffree;
++    fs_stat->f_favail = buf->f_favail;
++    fs_stat->f_fsid = buf->f_fsid;
++    fs_stat->f_flag = buf->f_flag;
++    fs_stat->f_namemax = buf->f_namemax;
++
++    return fs_stat;
++}
++
++char *qmp_guest_get_realpath(const char *path, Error **errp)
++{
++    struct stat sb;
++    char *linkname;
++    ssize_t r;
++
++    if (path == NULL) {
++        error_setg_errno(errp, errno, "path is null");
++        return NULL;
++    }
++
++    if (lstat(path, &sb) == -1) {
++        error_setg_errno(errp, errno, "path is not a link");
++        return NULL;
++    }
++
++    linkname = malloc(sb.st_size + 1);
++    if (linkname == NULL) {
++        error_setg_errno(errp, errno, "insufficient memory");
++        return NULL;
++    }
++
++    r = readlink(path, linkname, sb.st_size + 1);
++
++    if (r < 0) {
++        error_setg_errno(errp, errno, "readlink error");
++        return NULL;
++    }
++
++    if (r > sb.st_size) {
++        error_setg_errno(errp, errno, "symlink increased in size "
++                                      "between lstat() and readlink()");
++        return NULL;
++    }
++
++    linkname[sb.st_size] = '\0';
++
++    return linkname;
++}
++
++
+ /* register init/cleanup routines for stateful command groups */
+ void ga_command_state_init(GAState *s, GACommandState *cs)
+ {
+diff -u qemu-1.5.0+dfsg/qga/qapi-schema.json qemu-1.5.0+dfsg.new/qga/qapi-schema.json
+--- qemu-1.5.0+dfsg/qga/qapi-schema.json	2013-05-20 23:34:40.000000000 +0800
++++ qemu-1.5.0+dfsg.new/qga/qapi-schema.json	2013-08-12 10:54:18.721449954 +0800
+@@ -638,3 +638,66 @@
+ { 'command': 'guest-set-vcpus',
+   'data':    {'vcpus': ['GuestLogicalProcessor'] },
+   'returns': 'int' }
++
++##
++# @GuestFileSystemStatistics:
++#
++# Information about guest file system statistics.
++#
++# @f_bsize: file system block size.
++#
++# @f_frsize: fragment size.
++#
++# @f_blocks: size of fs in f_frsize units.
++#
++# @f_bfree: free blocks.
++#
++# @f_bavail: free blocks for non-root.
++#
++# @f_files: inodes.
++#
++# @f_ffree: free inodes.
++#
++# @f_favail: free inodes for non-root.
++#
++# @f_fsid: file system id.
++#
++# @f_flag: mount flags
++#
++# @f_namemax: maximum filename length.
++#
++# Since 1.5.10(NetEase)
++##
++{ 'type': 'GuestFileSystemStatistics',
++  'data': { 'f_bsize': 'int', 'f_frsize': 'int', 'f_blocks': 'int',
++            'f_bfree': 'int', 'f_bavail': 'int', 'f_files': 'int',
++            'f_ffree': 'int', 'f_favail': 'int', 'f_fsid': 'int',
++            'f_flag': 'int', 'f_namemax': 'int'} }
++
++##
++# @guest-get-statvfs:
++#
++# Get the information about guest file system statistics by statvfs.
++#
++# Returns: @GuestFileSystemStatistics.
++#
++# Since 1.5.10(NetEase)
++##
++{ 'command': 'guest-get-statvfs',
++  'data':    { 'path': 'str' },
++  'returns': 'GuestFileSystemStatistics' }
++
++##
++# @guest-get-realpath:
++#
++# Get the realpath of given link in guest file system.
++#
++# Returns: str.
++#
++# Since 1.5.10(NetEase)
++##
++{ 'command': 'guest-get-realpath',
++  'data':    { 'path': 'str' },
++  'returns': 'str' }
++
++
