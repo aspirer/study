@@ -1,5 +1,6 @@
 
 import base64
+import httplib
 import json
 import os
 
@@ -12,12 +13,12 @@ import instance
 import sender
 
 RUN_DC = True
-monitor_delay = 1
+monitor_delay = 60
 # `must` larger than 5s, default timeout of libvirt checking qga status is 5s
 read_file_time_out = 6
 temp_file_timeout = 30
 READ_BUF_LEN = 1024
-PERIOD_TIME = 1
+PERIOD_TIME = 60
 NET_CARD_LIST = ['eth0', ]
 
 instances_path = "/var/lib/nova/instances/"
@@ -769,9 +770,13 @@ class MonitorThread(BaseThread):
             temp_ok = get_system_usage.load_temp()
             last_partitions = get_system_usage.temp['disk_partition_info']
             all_usage_dict = get_system_usage.get_system_usage_datas()
-            if last_partitions != get_system_usage.temp['disk_partition_info']:
+            new_partitions = get_system_usage.temp['disk_partition_info']
+            if last_partitions != new_partitions:
                 print "xxxxxxxxx notify partitions change"
-                notify_succ = False
+                global instances_path
+                xml_path = instances_path + dom.name() + "/monitor_setting.xml"
+                notify_succ = sender.notify_platform_partition_change(new_partitions,
+                                    get_system_usage.info, xml_path, dom.UUIDString())
                 if not notify_succ:
                     get_system_usage.temp['disk_partition_info'] = last_partitions
             get_system_usage.save_temp()
@@ -782,8 +787,11 @@ class MonitorThread(BaseThread):
                                                     dom, get_system_usage.info)
                 metric_datas_json = json.dumps(metric_datas)
                 print "===========metric_datas_json %s" % metric_datas_json
-                #send_request = sender.SendRequest(metadata_dict, metric_datas_json)
-                #send_request.send_request_to_server()
+                send_request = sender.SendRequest(get_system_usage.info, metric_datas_json)
+                try:
+                    send_request.send_request_to_server()
+                except httplib.HTTPException as e:
+                    print "send request error, exception: %s" % e
             else:
                 print "first start or temp file is expired"
             print "monitor domain %s" % dom.UUIDString()
