@@ -21,7 +21,8 @@ def _get_token():
                              "password": "admin"}}}
     headers = {'content-type': 'application/json'}
     try:
-        r = requests.post(auth_url, data=json.dumps(data), headers=headers)
+        r = requests.post(auth_url, data=json.dumps(data), headers=headers,
+                          timeout=3)
         TOKEN = r.json()['access']['token']['id']
         TENANT_ID = r.json()['access']['token']['tenant']['id']
         print "get token: %s, belong to tenant: %s" % (TOKEN, TENANT_ID)
@@ -46,7 +47,8 @@ def get_all_instances_on_host():
         api_url = api_url_prefix + TENANT_ID + "/servers/detail"
 
         try:
-            r = requests.get(api_url, params=params, headers=headers, timeout=3)
+            r = requests.get(api_url, params=params, headers=headers,
+                             timeout=3)
             if r.status_code == 401:
                 retry += 1
                 _get_token()
@@ -58,7 +60,7 @@ def get_all_instances_on_host():
             else:
                 print "get instances error, code: %s" % r.status_code
                 return []
-        except Exception as e:
+        except requests.exceptions.RequestException as e:
             print "get instances error, exception: %s" % e
             return []
 

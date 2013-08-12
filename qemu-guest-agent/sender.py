@@ -1,30 +1,28 @@
 
 import hashlib
 import hmac
-import httplib
-import urllib
 
-from xml.etree import ElementTree
+import requests
+import utils
+
 
 class SendRequest(object):
     '''
         Send datas to monitor server by accesskey authorization.
     '''
-    def __init__(self, metadata_dict, metric_datas_json=None,
+    def __init__(self, info_file_dict, metric_datas_json=None,
                  request_uri='/rest/V1/MetricData',
                  headers={'Content-type': 'application/x-www-form-urlencoded'},
-                 http_method='POST',
                  system_partitions=None,
                  logic_partitions=None,
                  parti_dimension=None):
-        self.url = metadata_dict['monitorWebServerUrl']
+        self.url = info_file_dict['monitorWebServerUrl']
         self.request_uri = request_uri
         self.headers = headers
-        self.http_method = http_method
-        self.project_id = metadata_dict['ori_user']
-        self.name_space = metadata_dict['service']
-        self.access_key = metadata_dict['accessKey']
-        self.access_secret = metadata_dict['accessSecret']
+        self.project_id = info_file_dict['ori_user']
+        self.name_space = info_file_dict['service']
+        self.access_key = info_file_dict['accessKey']
+        self.access_secret = info_file_dict['accessSecret']
         self.metric_datas_json = metric_datas_json
         self.system_partitions = system_partitions
         self.logic_partitions = logic_partitions
@@ -34,11 +32,16 @@ class SendRequest(object):
         '''
             Send monitor datas to collect server by POST request.
         '''
+        signature = self.generate_signature()
+        if not signature:
+            print "signature is null: %s" % signature
+            return None
+
         params_dict = {
                 'ProjectId': self.project_id,
                 'Namespace': self.name_space,
                 'AccessKey': self.access_key,
-                'Signature': self.generate_signature()
+                'Signature': signature
         }
         if self.metric_datas_json != None:
             params_dict['MetricDatasJson'] = self.metric_datas_json
@@ -48,15 +51,14 @@ class SendRequest(object):
             params_dict['LogicPartitions'] = self.logic_partitions
         if self.parti_dimension != None:
             params_dict['Dimension'] = self.parti_dimension
-        params = urllib.urlencode(params_dict)
 
-        if str(self.url).startswith('http://'):
-            self.url = str(self.url).split("http://")[-1]
-        conn = httplib.HTTPConnection(self.url)
-        conn.request(self.http_method, self.request_uri, params, self.headers)
-        response = conn.getresponse()
-        conn.close()
-        return response
+        try:
+            r = requests.post(self.url + self.request_uri,
+                        params=params_dict, headers=self.headers, timeout=3)
+            return r
+        except requests.exceptions.RequestException as e:
+            print "send request to cloud monitor error, exception: %s" % e
+            return None
 
     def generate_stringToSign(self):
         '''
@@ -77,10 +79,10 @@ class SendRequest(object):
                                         self.project_id,
                                         self.system_partitions))
         else:
-            raise Exception()
+            return None
 
-        StringToSign = '%s\n%s\n%s\n%s\n' % \
-                      (self.http_method, self.request_uri,
+        # http method is always POST currently
+        StringToSign = 'POST\n%s\n%s\n%s\n' % (self.request_uri,
                        canonicalized_headers, canonicalized_resources)
 
         return StringToSign
@@ -93,6 +95,8 @@ class SendRequest(object):
             @return String
         '''
         stringToSign = self.generate_stringToSign()
+        if not stringToSign:
+            return None
         hashed = hmac.new(str(self.access_secret), stringToSign,
                           hashlib.sha256)
         s = hashed.digest()
@@ -100,9 +104,8 @@ class SendRequest(object):
         return signature
 
 
-
-
-def notify_platform_partition_change(disk_partition_info, metadata_dict, xml_path, uuid):
+def notify_platform_partition_change(disk_partition_info, info_file_dict,
+                monitor_setting_root, identify_id):
     '''
         notify platform when partition changed only when service supports
         diskPartition metric.
@@ -110,41 +113,21 @@ def notify_platform_partition_change(disk_partition_info, metadata_dict, xml_pat
         :param disk_partition_info: {'sys':['vda1'],
                                      'logic':['vda1', 'vdb1', 'dm-0']}
     '''
-    # metadata_dict = read_info_file()
-    service = metadata_dict.get('service')
-    resource_type = metadata_dict.get('resource_type')
-    setting_root = ElementTree.parse(xml_path)
-    setting_services = setting_root.findall('service')
-    metric_types = []
-    for s in setting_services:
-        if (service == s.attrib.get('name') and
-                resource_type == s.attrib.get('resource_type')):
-            metric_types = s.findall('metric')
-
-    metrics = [m.attrib.get('name') for m in metric_types]
-    if 'diskPartition' not in metrics:
-        return False
-
     request_uri = '/rest/V1/nvs/updatePartitionInfo'
     system_partitions = ','.join(disk_partition_info['sys'])
     logic_partitions = ','.join(disk_partition_info['logic'])
     # partition dimension is like openstack=1.1.1.1 or RDS=123456
-    parti_dimension = metadata_dict.get('service') + '=' + uuid
-    send_request = SendRequest(metadata_dict=metadata_dict,
+    parti_dimension = info_file_dict.get('service') + '=' + identify_id
+    send_request = SendRequest(info_file_dict=info_file_dict,
                                request_uri=request_uri,
                                system_partitions=system_partitions,
                                logic_partitions=logic_partitions,
                                parti_dimension=parti_dimension)
-    try:
-        response = send_request.send_request_to_server()
-        if response.status == 200:
-            return True
-        else:
-            return False
-    except httplib.HTTPException as e:
-        print "send request error, exception: %s" % e
+    response = send_request.send_request_to_server()
+    if response and response.status_code == 200:
+        return True
+    else:
         return False
-
 
 
 class MemcacheClient(object):

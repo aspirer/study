@@ -11,7 +11,7 @@ import heartbeat
 import data_stat
 
 
-enable_heartbeat = False
+enable_heartbeat = True
 enable_monitor = True
 
 

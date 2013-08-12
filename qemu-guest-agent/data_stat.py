@@ -1,16 +1,13 @@
 
 import base64
-import httplib
 import json
 import os
 
-from xml.etree import ElementTree
-
-from libvirt_qemu import libvirt
 import time
 from base_thread import BaseThread
 import instance
 import sender
+import utils
 
 RUN_DC = True
 monitor_delay = 60
@@ -21,8 +18,6 @@ READ_BUF_LEN = 1024
 PERIOD_TIME = 60
 NET_CARD_LIST = ['eth0', ]
 
-instances_path = "/var/lib/nova/instances/"
-
 
 '''
 Get system resources usage include disk, network, cpu, memory.
@@ -32,30 +27,9 @@ Disk: get disk read/write data((KB)), requests and used delay(ms).
 Network: get network I/O datas(bytes) and vm ip.
 '''
 class GetSystemUsage(object):
-    def __init__(self, domain, project_id, helper):
+    def __init__(self, domain, helper):
         self.domain = domain
         self.helper = helper
-        global instances_path
-        self.instance_dir = instances_path + self.domain.name()
-        if not os.path.exists(self.instance_dir):
-            self.instance_dir = instances_path + self.domain.UUIDString()
-
-        info_file = self.instance_dir + "/info"
-        with open(info_file, 'r') as f:
-            self.info = json.loads(f.read())
-        # check info file
-        service = self.info.get('service')
-        ori_user = self.info.get('ori_user', '')
-        aggregation_items = self.info.get('aggregation_items')
-        resource_type = self.info.get('resource_type')
-        if ori_user == '' and service == 'openstack':
-            self.info['ori_user'] = project_id
-        if aggregation_items == None or aggregation_items == '':
-            self.info['aggregation_items'] = {}
-        if service == 'openstack' and resource_type != 'openstack':
-            self.info['resource_type'] = 'openstack'
-
-        print "*******info file %s" % self.info
 
         print "init temp file"
         self.temp = {
@@ -75,7 +49,7 @@ class GetSystemUsage(object):
 
     def load_temp(self):
         global temp_file_timeout
-        temp_file = self.instance_dir + "/temp"
+        temp_file = utils.get_instance_dir(self.domain) + "/temp"
         if os.path.exists(temp_file):
             try:
                 print "loading temp file"
@@ -99,7 +73,7 @@ class GetSystemUsage(object):
             return False
 
     def save_temp(self):
-        temp_file = self.instance_dir + "/temp"
+        temp_file = utils.get_instance_dir(self.domain) + "/temp"
         print "save temp data of instance %s: %s" % (self.domain.UUIDString(), self.temp)
         with open(temp_file, 'w') as f:
             print "saving temp file to %s" % temp_file
@@ -607,7 +581,7 @@ class DataFormater(object):
             Setting the metric element parameters and datas.
             @return: dict
         '''
-        metric_datas = {
+        metric_data = {
             'metricName': metricName,
             'dimensions': dimensions,
             'aggregationDimensions': aggregationDimensions,
@@ -619,9 +593,36 @@ class DataFormater(object):
             'unit': unit
         }
 
-        return metric_datas
+        return metric_data
 
-    def format_data(self, all_usage_dict, domain, metadata_dict):
+    def _format_disk_partition(self, partition_info, partition_datas,
+                                identify_id, ag_dims, metric_datas):
+        partition_setting = {
+            'avail_capacity': ['availCapacity', 'Megabytes'],
+            'partition_usage': ['partitionUsage', 'Percent']
+        }
+        for partition_name in partition_datas:
+            if partition_name in partition_info['sys']:
+                partition_identity = 'system'
+            elif partition_name in partition_info['logic']:
+                partition_identity = 'logic'
+            else:
+                continue
+            # for partition data dimensions is like
+            # partition=uuid#::#system#::#vda1
+            dimensions = ('partition=' + identify_id + '#::#' +
+                            partition_identity + '#::#' + partition_name)
+            for parti_data_name in partition_datas[partition_name]:
+                parti_metric_name = partition_setting[parti_data_name][0]
+                parti_unit = partition_setting[parti_data_name][1]
+                parti_metric_data = \
+                            partition_datas[partition_name][parti_data_name]
+                metric_data = self._setting_params(parti_metric_name,
+                            dimensions, ag_dims, parti_metric_data, parti_unit)
+                metric_datas['metricDatas'].append(metric_data)
+
+    def format_data(self, all_usage_dict, monitor_setting_root,
+                    info_file_dict, identify_id):
         '''
             Format the collected datas into result and defined format:
             {"metricDatas": [
@@ -641,77 +642,29 @@ class DataFormater(object):
         metric_datas = dict()
         metric_datas['metricDatas'] = list()
 
-        if metadata_dict['service'] in ('openstack', 'NVS'):
-            # for openstack resource_id is store VM ip (eth0)
-            identify_id = domain.UUIDString()
-        else:
-            identify_id = metadata_dict['resource_id']
-
-        aggregation_items = metadata_dict['aggregation_items']
-
         # Read XML settings and set aggregation dimension
         # infos and store metric datas
-        global instances_path
-        XML_PATH = instances_path + domain.name() + "/monitor_setting.xml"
-        root = ElementTree.parse(XML_PATH)
-        services = root.getiterator("service")
-        for service in services:
-            if service.attrib['name'] == metadata_dict['service'] and \
-            service.attrib['resource_type'] == metadata_dict['resource_type']:
-                metrics = service.getiterator('metric')
-                for metric in metrics:
-                    metric_type = metric.attrib['name']
-                    metric_unit = metric.attrib['unit']
-                    aggregations = metric.getiterator('aggregation')
-                    aggregationDimensions = ''
-                    for aggregation in aggregations:
-                        ag_name = aggregation.attrib['name']
-                        if ag_name in aggregation_items:
-                            if aggregationDimensions != '':
-                                aggregationDimensions += ','
-                            aggregationDimensions += ag_name + '=' + \
-                                    aggregation_items[ag_name].encode('utf-8')
-                    if metric_type == 'diskPartition':
-                        partition_info = all_usage_dict[metric_type][0]
-                        partition_datas = all_usage_dict[metric_type][1]
-                        partition_setting = {
-                            'avail_capacity': ['availCapacity', 'Megabytes'],
-                            'partition_usage': ['partitionUsage', 'Percent']
-                        }
-                        for partition_name in partition_datas:
-                            if partition_name in partition_info['sys']:
-                                partition_identity = 'system'
-                            elif partition_name in partition_info['logic']:
-                                partition_identity = 'logic'
-                            else:
-                                continue
-                            # for partition data dimensions is like
-                            # partition=1.1.1.1#::#system#::#vda1
-                            dimensions = 'partition=' + identify_id + \
-                                    '#::#' + partition_identity + \
-                                    '#::#' + partition_name
-                            for parti_data_name in \
-                                            partition_datas[partition_name]:
-                                parti_metric_name = \
-                                        partition_setting[parti_data_name][0]
-                                parti_unit = \
-                                        partition_setting[parti_data_name][1]
-                                parti_metric_data = \
-                            partition_datas[partition_name][parti_data_name]
-                                metric_data = self._setting_params(
-                                    parti_metric_name, dimensions,
-                                    aggregationDimensions, parti_metric_data,
-                                    parti_unit)
-                                metric_datas['metricDatas'].append(metric_data)
-                    elif metric_type != 'diskPartition':
-                        # for normal data dimensions is like
-                        # openstack=1.1.1.1  or  RDS=1234567890
-                        dimensions = metadata_dict['resource_type'] + '=' + \
-                                                                    identify_id
-                        metric_data = self._setting_params(metric_type,
-                                    dimensions, aggregationDimensions,
-                                    all_usage_dict[metric_type], metric_unit)
-                        metric_datas['metricDatas'].append(metric_data)
+        metrics = utils.get_monitor_metrics(info_file_dict,
+                                            monitor_setting_root)
+        for metric in metrics:
+            metric_name = metric.attrib.get('name')
+            metric_unit = metric.attrib.get('unit')
+            aggregation_dimensions = utils.get_aggregation_dimensions(metric,
+                                        info_file_dict['aggregation_items'])
+
+            if metric_name == 'diskPartition':
+                partition_info = all_usage_dict[metric_name][0]
+                partition_datas = all_usage_dict[metric_name][1]
+                self._format_disk_partition(partition_info, partition_datas,
+                            identify_id, aggregation_dimensions, metric_datas)
+            else:
+                # for normal data dimensions is like
+                # openstack=uuid  or  RDS=resource_id
+                dims = info_file_dict['resource_type'] + '=' + identify_id
+                metric_data = self._setting_params(metric_name, dims,
+                                    aggregation_dimensions,
+                                    all_usage_dict[metric_name], metric_unit)
+                metric_datas['metricDatas'].append(metric_data)
 
         return metric_datas
 
@@ -728,7 +681,6 @@ class MonitorThread(BaseThread):
         return RUN_DC
 
     def _update_instances(self):
-        print "ith: 2, ", time.asctime()
         db_instances = instance.get_all_instances_on_host()
         db_uuids = [inst['id'] for inst in db_instances]
 
@@ -750,51 +702,80 @@ class MonitorThread(BaseThread):
                                 if uuid not in hyper_uuids]
         hyper_residual_domains = [dom.UUIDString() for dom in hyper_domains
                                     if dom.UUIDString() not in db_uuids]
+
         print "lost instances on the hypervisor: %s" % hyper_lost_domains
         print "residual domains on the hypervisor: %s" % hyper_residual_domains
         print "monitor domains: %s" % monitor_uuids
+
         return monitor_domains_with_project_id
 
     def serve(self):
         monitor_domains_with_project_id = self._update_instances()
         print "------start monitor ", time.asctime()
         for (dom, project_id) in monitor_domains_with_project_id:
-            if not dom.isActive():
-                print "domain is not active %s" % dom.UUIDString()
+            uuid = utils.get_domain_uuid(dom)
+            if not uuid:
+                print "get domain uuid failed"
                 continue
-            try:
-                get_system_usage = GetSystemUsage(dom, project_id, self.helper)
-            except (IOError, AttributeError, ValueError):
-                print "init sys usage failed, info file not found, uuid: %s" % dom.UUIDString()
+
+            if not utils.is_active(dom):
+                print "domain is not active, uuid: %s" % uuid
                 continue
+
+            info_file_dict = utils.get_info_file_dict(dom, project_id)
+            if not info_file_dict:
+                print "info file load error, uuid: %s" % uuid
+                continue
+
+            monitor_setting_root = utils.get_monitor_setting_root(dom)
+            if not monitor_setting_root:
+                print "monitor_setting file load error, uuid: %s" % uuid
+                continue
+
+            get_system_usage = GetSystemUsage(dom, self.helper)
             temp_ok = get_system_usage.load_temp()
             last_partitions = get_system_usage.temp['disk_partition_info']
+
             all_usage_dict = get_system_usage.get_system_usage_datas()
+
             new_partitions = get_system_usage.temp['disk_partition_info']
-            if last_partitions != new_partitions:
+            metrics = utils.get_monitor_metrics(info_file_dict,
+                                                monitor_setting_root)
+            metric_names = [m.attrib.get('name') for m in metrics]
+            print "metric_names: %s" % metric_names
+            identify_id = utils.get_identify_id(info_file_dict, uuid)
+            # FIXME(wangpan): hardcode here the 'diskPartition' metric
+            if ('diskPartition' in metric_names and
+                    last_partitions != new_partitions):
                 print "xxxxxxxxx notify partitions change"
-                global instances_path
-                xml_path = instances_path + dom.name() + "/monitor_setting.xml"
-                notify_succ = sender.notify_platform_partition_change(new_partitions,
-                                    get_system_usage.info, xml_path, dom.UUIDString())
+                notify_succ = sender.notify_platform_partition_change(
+                                        new_partitions, info_file_dict,
+                                        monitor_setting_root, identify_id)
                 if not notify_succ:
-                    get_system_usage.temp['disk_partition_info'] = last_partitions
+                    print "notify failed"
+                    get_system_usage.temp['disk_partition_info'] = \
+                                                            last_partitions
+
             get_system_usage.save_temp()
 
             if temp_ok:
-                print "monitor data of instance %s: %s" % (dom.UUIDString(), all_usage_dict)
+                print "monitor data of domain %s: %s" % (uuid, all_usage_dict)
                 metric_datas = DataFormater().format_data(all_usage_dict,
-                                                    dom, get_system_usage.info)
-                metric_datas_json = json.dumps(metric_datas)
-                print "===========metric_datas_json %s" % metric_datas_json
-                send_request = sender.SendRequest(get_system_usage.info, metric_datas_json)
-                try:
-                    send_request.send_request_to_server()
-                except httplib.HTTPException as e:
-                    print "send request error, exception: %s" % e
+                                                monitor_setting_root,
+                                                info_file_dict, identify_id)
+                send_request = sender.SendRequest(info_file_dict,
+                                                  json.dumps(metric_datas))
+
+                response = send_request.send_request_to_server()
+                if response and response.status_code == 200:
+                    print "successfully send monitor data to cloud monitor"
+                else:
+                    print "send monitor data error"
             else:
                 print "first start or temp file is expired"
-            print "monitor domain %s" % dom.UUIDString()
+
+            print "monitor domain %s" % uuid
+
         print "--------end monitor", time.asctime()
 
         self.start()
