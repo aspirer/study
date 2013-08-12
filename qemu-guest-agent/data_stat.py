@@ -17,7 +17,7 @@ monitor_delay = 1
 read_file_time_out = 6
 temp_file_timeout = 30
 READ_BUF_LEN = 1024
-PERIOD_TIME = 60
+PERIOD_TIME = 1
 NET_CARD_LIST = ['eth0', ]
 
 instances_path = "/var/lib/nova/instances/"
@@ -272,6 +272,25 @@ class GetSystemUsage(object):
                                                       'partition_usage': 15}}
                     }
         '''
+        def _get_disk_realpath(path):
+            global read_file_time_out
+            cmd_realpath = json.dumps({"execute": "guest-get-realpath",
+                                       "arguments": {"path": path}})
+
+            response = self.helper.exec_qga_command(self.domain, cmd_realpath,
+                                                timeout=read_file_time_out)
+            if response:
+                print "get realpath response: %s" % response
+                try:
+                    return json.loads(response)['return']
+                except (ValueError, KeyError, TypeError):
+                    print "get realpath failed"
+                    return None
+            else:
+                print "get realpath of %s by qga failed" % path
+                return None
+
+
         def _get_mounted_disks():
             '''
                 Get mounted disks/partitions from /proc/mounts.
@@ -288,7 +307,11 @@ class GetSystemUsage(object):
             for mount in mounts:
                 if mount.startswith('/dev/'):
                     mount = mount.split()
-                    partition = os.path.realpath(mount[0]).rsplit('/')[-1]
+                    realpath = _get_disk_realpath(mount[0])
+                    if realpath:
+                        partition = realpath.rsplit('/')[-1]
+                    else:
+                        partition = mount[0].rsplit('/')[-1]
                     target = mount[1]
                     if (partition not in mounted_disks and
                                     target not in mounted_disks.values()
@@ -744,7 +767,13 @@ class MonitorThread(BaseThread):
                 print "init sys usage failed, info file not found, uuid: %s" % dom.UUIDString()
                 continue
             temp_ok = get_system_usage.load_temp()
+            last_partitions = get_system_usage.temp['disk_partition_info']
             all_usage_dict = get_system_usage.get_system_usage_datas()
+            if last_partitions != get_system_usage.temp['disk_partition_info']:
+                print "xxxxxxxxx notify partitions change"
+                notify_succ = False
+                if not notify_succ:
+                    get_system_usage.temp['disk_partition_info'] = last_partitions
             get_system_usage.save_temp()
 
             if temp_ok:
