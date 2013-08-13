@@ -24,8 +24,8 @@ CONF.register_opts(global_opts)
 
 # main loop for monitor data collecting
 def main():
-    print "loading config files: %s" % sys.argv[1:]
-    CONF(sys.argv[1:])
+    print "enable heartbeat: %s" % CONF.enable_heartbeat
+    print "enable monitor: %s" % CONF.enable_monitor
 
     # create the heartbeat thread
     if CONF.enable_heartbeat:
@@ -48,8 +48,11 @@ if __name__ == "__main__":
     #data_stat.MonitorThread.stop()
     #print heartbeat.HeartBeatThread.RUN_TH
     #print data_stat.MonitorThread.RUN_TH
-
+    print "loading config files: %s" % sys.argv[2:]
+    CONF(sys.argv[1:])
+    #import ipdb;ipdb.set_trace()
     main()
+
     # LOG.info("stop monitor")
 
 
