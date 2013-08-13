@@ -44,6 +44,11 @@ if __name__ == "__main__":
 
     # LOG.info("start monitor")
     # daemonize()
+    #heartbeat.HeartBeatThread.stop()
+    #data_stat.MonitorThread.stop()
+    #print heartbeat.HeartBeatThread.RUN_TH
+    #print data_stat.MonitorThread.RUN_TH
+
     main()
     # LOG.info("stop monitor")
 

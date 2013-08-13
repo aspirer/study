@@ -32,9 +32,9 @@ class HeartBeatThread(BaseThread):
         self.sender = sender.MemcacheClient()
         self.qga_cmd = {"execute": "guest-sync", "arguments": {"id": 0}}
 
-    def _run(self):
-        global RUN_HB
-        return RUN_HB
+    @staticmethod
+    def stop():
+        HeartBeatThread.RUN_TH = False
 
     def serve(self):
         print "-----heartbeat start: ", time.asctime()

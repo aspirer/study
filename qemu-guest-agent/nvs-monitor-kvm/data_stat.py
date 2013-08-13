@@ -687,9 +687,9 @@ class MonitorThread(BaseThread):
         super(MonitorThread, self).__init__()
         self.delay = CONF.monitor_delay
 
-    def _run(self):
-        global RUN_DC
-        return RUN_DC
+    @staticmethod
+    def stop():
+        MonitorThread.RUN_TH = False
 
     def _update_instances(self):
         db_instances = instance.get_all_instances_on_host()
