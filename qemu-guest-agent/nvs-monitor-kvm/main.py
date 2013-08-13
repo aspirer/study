@@ -7,7 +7,7 @@ from oslo.config import cfg
 
 import heartbeat
 import data_stat
-
+import log
 
 global_opts = [
     cfg.BoolOpt('enable_monitor',
@@ -21,11 +21,13 @@ global_opts = [
 CONF = cfg.CONF
 CONF.register_opts(global_opts)
 
+LOG = log.getLogger(__name__)
+
 
 # main loop for monitor data collecting
 def main():
-    print "enable heartbeat: %s" % CONF.enable_heartbeat
-    print "enable monitor: %s" % CONF.enable_monitor
+    LOG.info("enable heartbeat: %s" % CONF.enable_heartbeat)
+    LOG.info("enable monitor: %s" % CONF.enable_monitor)
 
     # create the heartbeat thread
     if CONF.enable_heartbeat:
@@ -48,7 +50,7 @@ if __name__ == "__main__":
     #data_stat.MonitorThread.stop()
     #print heartbeat.HeartBeatThread.RUN_TH
     #print data_stat.MonitorThread.RUN_TH
-    print "loading config files: %s" % sys.argv[2:]
+    LOG.info("loading config files: %s" % sys.argv[2:])
     CONF(sys.argv[1:])
     #import ipdb;ipdb.set_trace()
     main()

@@ -6,16 +6,18 @@ import os
 import time
 from base_thread import BaseThread
 import instance
+import log
 import sender
 import utils
 from oslo.config import cfg
-
-RUN_DC = True
 
 
 data_stat_opts = [
     cfg.IntOpt('monitor_delay',
                default=60,
+               help='The interval seconds of collecting vm monitor data'),
+    cfg.StrOpt('temp_file_name',
+               default='temp',
                help='The interval seconds of collecting vm monitor data'),
     cfg.IntOpt('read_file_time_out',
                default=6,
@@ -35,6 +37,8 @@ data_stat_opts = [
 
 CONF = cfg.CONF
 CONF.register_opts(data_stat_opts)
+
+LOG = log.getLogger(__name__)
 
 
 '''
@@ -66,10 +70,11 @@ class GetSystemUsage(object):
                 }
 
     def load_temp(self):
-        temp_file = utils.get_instance_dir(self.domain) + "/temp"
+        temp_file = os.path.join(utils.get_instance_dir(self.domain),
+                                CONF.temp_file_name)
         if os.path.exists(temp_file):
             try:
-                print "loading temp file"
+                LOG.debug("Loading temp file from %s" % temp_file)
                 with open(temp_file, 'r') as f:
                     temp_data = json.loads(f.read())
                 elapse = long(time.time()) - temp_data['timestamp']
@@ -78,29 +83,31 @@ class GetSystemUsage(object):
                     for k,v in temp_data.iteritems():
                         if k in self.temp:
                             self.temp[k] = v
-                    print "loaded temp file: %s" % self.temp
+                    LOG.debug("Loaded temp file: %s" % self.temp)
                     return True
                 else:
-                    print "temp file time out"
+                    LOG.debug("Temp file is time out")
                     return False
             except (KeyError, TypeError, AttributeError, ValueError) as e:
-                print "temp file %s read failed, exception: %s" % (temp_file, e)
+                LOG.warn("Loaded temp file at %s failed, exception: %s" %
+                            (temp_file, e))
                 return False
         else:
-            print "temp file not found at %s" % temp_file
+            LOG.warn("Temp file not found at %s" % temp_file)
             return False
 
     def save_temp(self):
-        temp_file = utils.get_instance_dir(self.domain) + "/temp"
-        print "save temp data of instance %s: %s" % (self.domain.UUIDString(), self.temp)
+        temp_file = os.path.join(utils.get_instance_dir(self.domain),
+                                CONF.temp_file_name)
+        LOG.debug("Saving temp data of instance %s to %s: %s" %
+                    (utils.get_domain_uuid(self.domain), temp_file, self.temp))
         with open(temp_file, 'w') as f:
-            print "saving temp file to %s" % temp_file
             self.temp['timestamp'] = long(time.time())
             f.write(json.dumps(self.temp))
-            print "saved temp file"
 
 
     """
+    The response of reading file from qga:
 	"return": {
 		"count": 755,
 		"buf-b64": "Y3B1ICA0OTYxIDAgNTQwNiA1MzQ4MT...",
@@ -114,14 +121,14 @@ class GetSystemUsage(object):
         response = self.helper.exec_qga_command(self.domain, cmd_open,
                                             timeout=CONF.read_file_time_out)
         if response:
-            print "open file response: %s" % response
+            LOG.debug("Open file response from qga: %s" % response)
             try:
                 handle = json.loads(response)['return']
-            except (ValueError, KeyError, TypeError):
-                print "get file handle failed"
+            except (ValueError, KeyError, TypeError) as e:
+                LOG.warn("Open file by qga failed, exception: %s" % e)
                 handle = None
         else:
-            print "open guest file %s by qga failed" % file
+            LOG.warn("Open file %s by qga failed" % file)
             handle = None
 
         if not handle:
@@ -136,7 +143,7 @@ class GetSystemUsage(object):
             response = self.helper.exec_qga_command(self.domain, cmd_read,
                                             timeout=CONF.read_file_time_out)
             if response:
-                print "read file response: %s" % response
+                LOG.debug("Read file response from qga: %s" % response)
                 try:
                     if not read_eof:
                         # don't need to read all file contents
@@ -144,12 +151,12 @@ class GetSystemUsage(object):
                     else:
                         eof = json.loads(response)['return']['eof']
                     read_file_b64 = json.loads(response)['return']['buf-b64']
-                except (ValueError, KeyError, TypeError):
-                    print "get file handle failed"
+                except (ValueError, KeyError, TypeError) as e:
+                    LOG.warn("Read file by qga failed, exception: %s" % e)
                     read_file_b64 = None
                     break
             else:
-                print "open guest file %s by qga failed, exception: %s" % (file, e)
+                LOG.warn("Read file %s by qga failed, exception: %s" % file)
                 read_file_b64 = None
                 break
 
@@ -164,7 +171,7 @@ class GetSystemUsage(object):
         try:
             return base64.decodestring(read_file_b64)
         except binascii.Error as e:
-            print "base64 decode failed, exception: %s" % e
+            LOG.warn("Base64 decode failed, exception: %s" % e)
             return None
 
     def _get_cpu_usage_dict(self):
@@ -194,8 +201,10 @@ class GetSystemUsage(object):
             self.temp['total_cpu_time'] = total_cpu_time
             self.temp['last_cpu_idle_time'] = cpu_idle_time
         else:
-            print "cpu_usage get failed, uuid: %s" % self.domain.UUIDString()
+            LOG.warn("Cpu usage get failed, uuid: %s" %
+                        utils.get_domain_uuid(self.domain))
             cpu_usage = 0.0
+
         return {'cpu_usage': cpu_usage}
 
     def _get_loadavg_dict(self):
@@ -208,8 +217,10 @@ class GetSystemUsage(object):
             loadavg_info_line = loadavg_file_read.splitlines()[0]
             loadavg_5 = float(loadavg_info_line.split()[1])
         else:
-            print "loadavg_5 get failed, uuid: %s" % self.domain.UUIDString()
+            LOG.warn("Loadavg_5 get failed, uuid: %s" %
+                        utils.get_domain_uuid(self.domain))
             loadavg_5 = 0.0
+
         return {'loadavg_5': loadavg_5}
 
     def _get_memory_usage_dict(self):
@@ -231,7 +242,8 @@ class GetSystemUsage(object):
         if mem_file_read:
             mem_info_lines = mem_file_read.splitlines()
         else:
-            print "mem_usage get failed, uuid: %s" % self.domain.UUIDString()
+            LOG.warn("Mem usage get failed, uuid: %s" %
+                        utils.get_domain_uuid(self.domain))
             return mem_usage
 
         mem_usage['total_memory'] = long(mem_info_lines[0].split()[1]) / 1024
@@ -270,14 +282,15 @@ class GetSystemUsage(object):
             response = self.helper.exec_qga_command(self.domain, cmd_realpath,
                                             timeout=CONF.read_file_time_out)
             if response:
-                print "get realpath response: %s" % response
+                LOG.debug("Get realpath response from qga: %s" % response)
                 try:
                     return json.loads(response)['return']
-                except (ValueError, KeyError, TypeError):
-                    print "get realpath failed"
+                except (ValueError, KeyError, TypeError) as e:
+                    LOG.warn("get realpath failed, uuid: %s, exception: %s" %
+                                (utils.get_domain_uuid(self.domain), e))
                     return None
             else:
-                print "get realpath of %s by qga failed" % path
+                LOG.warn("Get realpath of %s by qga failed" % path)
                 return None
 
 
@@ -286,14 +299,15 @@ class GetSystemUsage(object):
                 Get mounted disks/partitions from /proc/mounts.
                 @return: partition:target dict: {'vda1': '/', 'dm-0': '/mnt'}
             '''
-            # xxxx how to get real_path
             mounted_disks = {}
             mounts_file = self._read_file_from_guest('/proc/mounts')
             if mounts_file:
                 mounts = mounts_file.splitlines()
             else:
-                print "mounted disks get failed, uuid: %s" % self.domain.UUIDString()
+                LOG.warn("Get mounted disks failed, uuid: %s" %
+                            utils.get_domain_uuid(self.domain))
                 return mounted_disks
+
             for mount in mounts:
                 if mount.startswith('/dev/'):
                     mount = mount.split()
@@ -304,9 +318,9 @@ class GetSystemUsage(object):
                         partition = mount[0].rsplit('/')[-1]
                     target = mount[1]
                     if (partition not in mounted_disks and
-                                    target not in mounted_disks.values()
-                                    or (target == '/' and
-                                        '/' not in mounted_disks.values())):
+                            target not in mounted_disks.values()
+                            or (target == '/' and
+                                '/' not in mounted_disks.values())):
                         mounted_disks[partition] = target
 
             return mounted_disks
@@ -331,14 +345,16 @@ class GetSystemUsage(object):
             response = self.helper.exec_qga_command(self.domain, cmd_statvfs,
                                             timeout=CONF.read_file_time_out)
             if response:
-                print "open file response: %s" % response
+                LOG.debug("Get statvfs response from qga: %s" % response)
                 try:
                     hddinfo = json.loads(response)['return']
-                except (ValueError, KeyError, TypeError):
-                    print "get statvfs failed, uuid: %s" % self.domain.UUIDString()
+                except (ValueError, KeyError, TypeError) as e:
+                    LOG.warn("Get statvfs failed, uuid: %s, exception: %s" %
+                                (utils.get_domain_uuid(self.domain), e))
                     hddinfo = None
             else:
-                print "get statvfs failed, uuid: %s" % self.domain.UUIDString()
+                LOG.warn("Get statvfs failed, uuid: %s" %
+                            utils.get_domain_uuid(self.domain))
                 return fs_info
 
             fs_info['total'] = byte_to_mb(hddinfo['f_frsize'] * hddinfo['f_blocks'])
@@ -382,7 +398,8 @@ class GetSystemUsage(object):
             if diskstats:
                 disk_datas = diskstats.splitlines()
             else:
-                print "get diskstats failed, uuid: %s" % self.domain.UUIDString()
+                LOG.warn("Get diskstats failed, uuid: %s" %
+                            utils.get_domain_uuid(self.domain))
                 return
 
             for disk_data in disk_datas:
@@ -437,21 +454,24 @@ class GetSystemUsage(object):
         if read_request_period_time == 0:
             read_request_period_time = 1
 
-        disk_write_rate = float(now_disk_data['disk_write'] - \
-                                self.temp['disk_write']) / CONF.monitor_delay
-        disk_read_rate = float(now_disk_data['disk_read'] - \
-                               self.temp['disk_read']) / CONF.monitor_delay
-        disk_write_request = float(now_disk_data['disk_write_request'] - \
-                self.temp['disk_write_request']) / CONF.monitor_delay
-        disk_read_request = float(now_disk_data['disk_read_request'] - \
-                self.temp['disk_read_request']) / CONF.monitor_delay
-        disk_write_delay = float(now_disk_data['disk_write_delay'] - \
-            self.temp['disk_write_delay']) / float(write_request_period_time)
-        disk_read_delay = float(now_disk_data['disk_read_delay'] - \
-            self.temp['disk_read_delay']) / float(read_request_period_time)
-        if disk_write_rate < 0 or disk_read_rate < 0 \
-                        or disk_write_request < 0 or disk_read_request < 0 \
-                        or disk_write_delay < 0 or disk_read_delay < 0:
+        disk_write_rate = (float(now_disk_data['disk_write'] -
+                                self.temp['disk_write'])) / CONF.monitor_delay
+        disk_read_rate = (float(now_disk_data['disk_read'] -
+                               self.temp['disk_read'])) / CONF.monitor_delay
+        disk_write_request = (float(now_disk_data['disk_write_request'] -
+                        self.temp['disk_write_request'])) / CONF.monitor_delay
+        disk_read_request = (float(now_disk_data['disk_read_request'] -
+                        self.temp['disk_read_request'])) / CONF.monitor_delay
+        disk_write_delay = (float(now_disk_data['disk_write_delay'] -
+            self.temp['disk_write_delay'])) / float(write_request_period_time)
+        disk_read_delay = (float(now_disk_data['disk_read_delay'] -
+            self.temp['disk_read_delay'])) / float(read_request_period_time)
+        if (disk_write_rate < 0 or disk_read_rate < 0
+                    or disk_write_request < 0 or disk_read_request < 0
+                    or disk_write_delay < 0 or disk_read_delay < 0):
+            LOG.warn("Disk info invalid: %s, %s, %s, %s, %s, %s" %
+                        (disk_write_rate, disk_read_rate, disk_write_request,
+                         disk_read_request, disk_write_delay, disk_read_delay))
             disk_write_rate = 0.0
             disk_read_rate = 0.0
             disk_write_request = 0.0
@@ -471,24 +491,9 @@ class GetSystemUsage(object):
                 'disk_partition_data': now_disk_data['disk_partition_data']
         }
 
-        # when partition info changed, notify platform with new partition info
-        #last_partition_info = {}
-        #is_success = True
-        #if now_disk_data.get('disk_partition_info') \
-        #        != self.temp.get('disk_partition_info'):
-            #is_success = notify_platform_partition_change(
-            #                now_disk_data.get('disk_partition_info', []))
-            #if not is_success:
-            #   last_partition_info = self.temp['disk_partition_info']
-
         for key in now_disk_data.keys():
             if key in self.temp:
                 self.temp[key] = now_disk_data[key]
-
-        # FIXME(hzyangtk): here add for don`t record partition info into temp.
-        # To do this when partition monitor enable, partition change will occur
-        #if not ENABLE_PARTITION_MONITOR or not is_success:
-        #    self.temp['disk_partition_info'] = last_partition_info
 
         return disk_usage_dict
 
@@ -509,7 +514,8 @@ class GetSystemUsage(object):
         if net_devs:
             network_lines = net_devs.splitlines()
         else:
-            print "get network data failed, uuid: %s" % self.domain.UUIDString()
+            LOG.warn("Get network data failed, uuid: %s" %
+                        utils.get_domain_uuid(self.domain))
             return [receive_bytes, transfer_bytes]
         for network_line in network_lines:
             network_datas = network_line.replace(':', ' ').split()
@@ -519,7 +525,9 @@ class GetSystemUsage(object):
                     receive_packages += long(network_datas[2])
                     transfer_bytes += long(network_datas[9])
                     transfer_packages += long(network_datas[10])
-            except (KeyError, ValueError, IndexError, TypeError):
+            except (KeyError, ValueError, IndexError, TypeError) as e:
+                LOG.warn("Get invalid network data, uuid: %s, exception: %s" %
+                            (utils.get_domain_uuid(self.domain), e))
                 continue
         return [receive_bytes, transfer_bytes]
 
@@ -538,11 +546,14 @@ class GetSystemUsage(object):
         old_transfer_bytes = self.temp['network_transfer_bytes']
         now_receive_bytes, now_transfer_bytes = \
                                     self._get_network_flow_data()
-        receive_rate = float(now_receive_bytes - old_receive_bytes) \
-                                            / 1024 / CONF.monitor_delay
-        transfer_rate = float(now_transfer_bytes - old_transfer_bytes) \
-                                            / 1024 / CONF.monitor_delay
+        receive_rate = (float(now_receive_bytes - old_receive_bytes)
+                                / 1024.0 / CONF.monitor_delay)
+        transfer_rate = (float(now_transfer_bytes - old_transfer_bytes)
+                                / 1024.0 / CONF.monitor_delay)
         if receive_rate < 0 or transfer_rate < 0:
+            LOG.warn("Get invalid network rate data: uuid: %s, %s, %s" %
+                        (utils.get_domain_uuid(self.domain),
+                         receive_rate, transfer_rate))
             receive_rate = 0
             transfer_rate = 0
 
@@ -633,7 +644,7 @@ class DataFormater(object):
                             dimensions, ag_dims, parti_metric_data, parti_unit)
                 metric_datas['metricDatas'].append(metric_data)
 
-    def format_data(self, all_usage_dict, monitor_setting_root,
+    def format_data(self, metrics, all_usage_dict, monitor_setting_root,
                     info_file_dict, identify_id):
         '''
             Format the collected datas into result and defined format:
@@ -654,10 +665,7 @@ class DataFormater(object):
         metric_datas = dict()
         metric_datas['metricDatas'] = list()
 
-        # Read XML settings and set aggregation dimension
-        # infos and store metric datas
-        metrics = utils.get_monitor_metrics(info_file_dict,
-                                            monitor_setting_root)
+        # set aggregation dimension infos and store metric datas
         for metric in metrics:
             metric_name = metric.attrib.get('name')
             metric_unit = metric.attrib.get('unit')
@@ -714,33 +722,34 @@ class MonitorThread(BaseThread):
         hyper_residual_domains = [dom.UUIDString() for dom in hyper_domains
                                     if dom.UUIDString() not in db_uuids]
 
-        print "lost instances on the hypervisor: %s" % hyper_lost_domains
-        print "residual domains on the hypervisor: %s" % hyper_residual_domains
-        print "monitor domains: %s" % monitor_uuids
+        LOG.debug("Lost instances on the hypervisor: %s" % hyper_lost_domains)
+        LOG.debug("Residual domains on the hypervisor: %s" %
+                    hyper_residual_domains)
+        LOG.debug("Monitor domains: %s" % monitor_uuids)
 
         return monitor_domains_with_project_id
 
     def serve(self):
+        LOG.info("Monitor thread start")
         monitor_domains_with_project_id = self._update_instances()
-        print "------start monitor ", time.asctime()
         for (dom, project_id) in monitor_domains_with_project_id:
             uuid = utils.get_domain_uuid(dom)
             if not uuid:
-                print "get domain uuid failed"
+                LOG.warn("Get domain uuid failed")
                 continue
 
             if not utils.is_active(dom):
-                print "domain is not active, uuid: %s" % uuid
+                LOG.info("Domain is not active, uuid: %s" % uuid)
                 continue
 
             info_file_dict = utils.get_info_file_dict(dom, project_id)
             if not info_file_dict:
-                print "info file load error, uuid: %s" % uuid
+                LOG.warn("Info file load failed, uuid: %s" % uuid)
                 continue
 
             monitor_setting_root = utils.get_monitor_setting_root(dom)
             if not monitor_setting_root:
-                print "monitor_setting file load error, uuid: %s" % uuid
+                LOG.warn("Monitor setting file load failed, uuid: %s" % uuid)
                 continue
 
             get_system_usage = GetSystemUsage(dom, self.helper)
@@ -753,25 +762,27 @@ class MonitorThread(BaseThread):
             metrics = utils.get_monitor_metrics(info_file_dict,
                                                 monitor_setting_root)
             metric_names = [m.attrib.get('name') for m in metrics]
-            print "metric_names: %s" % metric_names
+            LOG.debug("Metric names of %s: %s" % (uuid, metric_names))
             identify_id = utils.get_identify_id(info_file_dict, uuid)
+
             # FIXME(wangpan): hardcode here the 'diskPartition' metric
             if ('diskPartition' in metric_names and
                     last_partitions != new_partitions):
-                print "xxxxxxxxx notify partitions change"
+                LOG.info("Notifing partitions change of %s, old: %s, new: %s" %
+                            (uuid, last_partitions, new_partitions))
                 notify_succ = sender.notify_platform_partition_change(
                                         new_partitions, info_file_dict,
                                         monitor_setting_root, identify_id)
                 if not notify_succ:
-                    print "notify failed"
+                    LOG.warn("Notifing partitions change failed")
                     get_system_usage.temp['disk_partition_info'] = \
                                                             last_partitions
 
             get_system_usage.save_temp()
 
             if temp_ok:
-                print "monitor data of domain %s: %s" % (uuid, all_usage_dict)
-                metric_datas = DataFormater().format_data(all_usage_dict,
+                metric_datas = DataFormater().format_data(metrics,
+                                                all_usage_dict,
                                                 monitor_setting_root,
                                                 info_file_dict, identify_id)
                 send_request = sender.SendRequest(info_file_dict,
@@ -779,14 +790,11 @@ class MonitorThread(BaseThread):
 
                 response = send_request.send_request_to_server()
                 if response and response.status_code == 200:
-                    print "successfully send monitor data to cloud monitor"
+                    LOG.debug("Send monitor data of %s successfully" % uuid)
                 else:
-                    print "send monitor data error"
+                    LOG.error("Send monitor data of %s faild" % uuid)
             else:
-                print "first start or temp file is expired"
-
-            print "monitor domain %s" % uuid
-
-        print "--------end monitor", time.asctime()
+                LOG.info("First start or temp file is expired, %s" % uuid)
 
         self.start()
+        LOG.info("Monitor thread end")

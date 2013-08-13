@@ -5,10 +5,10 @@ import time
 from libvirt_qemu import libvirt
 from base_thread import BaseThread
 from oslo.config import cfg
+import log
 import sender
 import utils
 
-RUN_HB = True
 
 heartbeat_opts = [
     cfg.IntOpt('heartbeat_delay',
@@ -24,6 +24,8 @@ heartbeat_opts = [
 CONF = cfg.CONF
 CONF.register_opts(heartbeat_opts)
 
+LOG = log.getLogger(__name__)
+
 
 class HeartBeatThread(BaseThread):
     def __init__(self):
@@ -37,21 +39,28 @@ class HeartBeatThread(BaseThread):
         HeartBeatThread.RUN_TH = False
 
     def serve(self):
-        print "-----heartbeat start: ", time.asctime()
+        LOG.info("Heartbeat thread start")
         domains = self.helper.list_all_domains()
         for dom in domains:
-            if not utils.is_active(dom):
-                print "domain is not active %s" % dom.UUIDString()
+            uuid = utils.get_domain_uuid(dom)
+            if not uuid:
+                LOG.warn("Get domain uuid failed")
                 continue
+
+            if not utils.is_active(dom):
+                LOG.info("domain is not active, uuid %s" % uuid)
+                continue
+
             heartbeat_cmd = json.dumps({"execute": "guest-sync",
-                                    "arguments": {"id": long(time.time())}})
+                                        "arguments":
+                                            {"id": long(time.time())}})
             response = self.helper.exec_qga_command(dom, heartbeat_cmd,
                                             timeout=CONF.heartbeat_cmd_timeout)
-            print "qga response: %s" % response
+            LOG.debug("Sync command response from qga: %s" % response)
             if response:
-                self.sender.report_heartbeat(utils.get_domain_uuid(dom))
+                self.sender.report_heartbeat(uuid)
             else:
-                print "heartbeat command failed"
-        print "-----heartbeat end: ", time.asctime()
+                LOG.warn("Sync command failed, uuid: %s" % uuid)
 
         self.start()
+        LOG.info("Heartbeat thread end")

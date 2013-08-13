@@ -3,14 +3,16 @@ import libvirt_qemu
 from libvirt_qemu import libvirt
 import threading
 
+import log
+
 _LIBVIRT_CONN = libvirt.open(None)
 
 CONN_LOCK = threading.RLock()
 
+LOG = log.getLogger(__name__)
 
 class LibvirtQemuHelper(object):
     def __init__(self):
-        print "init libvirt conn"
         global _LIBVIRT_CONN
         if _LIBVIRT_CONN:
             self._conn = _LIBVIRT_CONN
@@ -18,14 +20,11 @@ class LibvirtQemuHelper(object):
             self._conn = None
 
     def _get_conn(self):
-        print "get new libvirt conn"
+        LOG.info("Getting new libvirt connection")
         global _LIBVIRT_CONN
-        try:
-            _LIBVIRT_CONN = libvirt.open(None)
-        except libvirt.libvirtError as e:
-            print "get connection to libvirt failed, exception: %s" % e
-        else:
-            self._conn = _LIBVIRT_CONN
+        _LIBVIRT_CONN = libvirt.open(None)
+        self._conn = _LIBVIRT_CONN
+        LOG.info("Got new libvirt connection")
 
     def _test_conn(self):
         # if conn disconnect, get a new one
@@ -37,32 +36,34 @@ class LibvirtQemuHelper(object):
         except libvirt.libvirtError as e:
             if (e.get_error_code() in (libvirt.VIR_ERR_SYSTEM_ERROR,
                                        libvirt.VIR_ERR_INTERNAL_ERROR) and
-                e.get_error_domain() in (libvirt.VIR_FROM_REMOTE,
+                    e.get_error_domain() in (libvirt.VIR_FROM_REMOTE,
                                          libvirt.VIR_FROM_RPC)):
-                print "test connection to libvirt failed"
+                LOG.warn("Connection to libvirt is broken")
                 return False
             raise
 
     def list_all_domains(self):
         global CONN_LOCK
         with CONN_LOCK:
-            if not self._test_conn():
-                try:
+            try:
+                if not self._test_conn():
                     self._get_conn()
-                except libvirt.libvirtError as e:
-                    print "get connection to libvirt failed, exception: %s" % e
-                    return []
+            except libvirt.libvirtError as e:
+                LOG.error("Connect to libvirt failed, exception: %s" % e)
+                return []
+
             try:
                 return self._conn.listAllDomains()
             except libvirt.libvirtError as e:
-                print "get all domain ids failed, exception: %s" % e
+                LOG.warn("List all domains failed, exception: %s" % e)
                 return []
 
     @staticmethod
-    def exec_qga_command(domain, cmd, timeout=1, flags=0):
-        print "going to execute qga cmd %s" % cmd
+    def exec_qga_command(domain, cmd, timeout=6, flags=0):
+        LOG.debug("Going to execute qga cmd %s" % cmd)
         try:
             return libvirt_qemu.qemuAgentCommand(domain, cmd, timeout, flags)
         except libvirt.libvirtError as e:
-            print "run qga cmd %s cmd error, uuid: %s, exception: %s" % (cmd, domain.UUIDString(), e)
+            LOG.warn("Run qga cmd %s failed, uuid: %s, exception: %s" %
+                        (cmd, domain.UUIDString(), e))
             return None

@@ -7,6 +7,8 @@ from xml.etree import ElementTree as ET
 from libvirt_qemu import libvirt
 from oslo.config import cfg
 
+import log
+
 util_opts = [
     cfg.StrOpt('instances_path',
                default='/var/lib/nova/instances/',
@@ -16,32 +18,38 @@ util_opts = [
 CONF = cfg.CONF
 CONF.register_opts(util_opts)
 
+LOG = log.getLogger(__name__)
+
 
 def get_host_name():
     try:
         return socket.gethostname()
-    except socket.error:
+    except socket.error as e:
+        LOG.error("Get host name failed, exception: %s" % e)
         return None
 
 
 def is_active(domain):
     try:
         return domain.isActive()
-    except libvirt.libvirtError:
+    except libvirt.libvirtError as e:
+        LOG.error("Check domain is active failed, exception: %s" % e)
         return False
 
 
 def get_domain_name(domain):
     try:
         return domain.name()
-    except libvirt.libvirtError:
+    except libvirt.libvirtError as e:
+        LOG.error("Get domain name failed, exception: %s" % e)
         return None
 
 
 def get_domain_uuid(domain):
     try:
         return domain.UUIDString()
-    except libvirt.libvirtError:
+    except libvirt.libvirtError as e:
+        LOG.error("Get domain name failed, exception: %s" % e)
         return None
 
 
@@ -52,10 +60,12 @@ def get_instance_dir(domain):
             instance_dir = CONF.instances_path + get_domain_uuid(domain)
 
         if not os.path.exists(instance_dir):
+            LOG.error("Get instance dir failed")
             return None
         else:
             return instance_dir
     except TypeError:
+        LOG.error("Get instance dir failed, TypeError")
         return None
 
 
@@ -78,7 +88,8 @@ def get_info_file_dict(domain, project_id):
             info_dict['resource_type'] = 'openstack'
 
         return info_dict
-    except (IOError, TypeError, KeyError):
+    except (IOError, TypeError, KeyError) as e:
+        LOG.error("Load info file failed, exception: %s" % e)
         return None
 
 
@@ -86,7 +97,8 @@ def get_monitor_setting_root(domain):
     try:
         monitor_setting_file = get_instance_dir(domain) + "/monitor_setting.xml"
         return ET.parse(monitor_setting_file)
-    except (ET.ParseError, IOError, TypeError):
+    except (ET.ParseError, IOError, TypeError) as e:
+        LOG.error("Parse monitor setting file failed, exception: %s" % e)
         return None
 
 

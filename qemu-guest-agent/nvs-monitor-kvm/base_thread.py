@@ -11,9 +11,6 @@ class BaseThread(object):
     def _run(self):
         return self.RUN_TH
 
-    def serve(self):
-        print "not implement"
-
     def start(self):
         if self._run():
             Timer(self.delay, self.serve).start()

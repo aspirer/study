@@ -2,8 +2,22 @@
 import hashlib
 import hmac
 
+import log
 import requests
 import utils
+
+from oslo.config import cfg
+
+sender_opts = [
+    cfg.IntOpt('send_request_timeout',
+               default=5,
+               help='The timeout seconds of getting instances by nova api'),
+    ]
+
+CONF = cfg.CONF
+CONF.register_opts(sender_opts)
+
+LOG = log.getLogger(__name__)
 
 
 class SendRequest(object):
@@ -34,7 +48,7 @@ class SendRequest(object):
         '''
         signature = self.generate_signature()
         if not signature:
-            print "signature is null: %s" % signature
+            LOG.error("Signature is null: %s" % signature)
             return None
 
         params_dict = {
@@ -52,12 +66,13 @@ class SendRequest(object):
         if self.parti_dimension != None:
             params_dict['Dimension'] = self.parti_dimension
 
+        full_url = self.url + self.request_uri
         try:
-            r = requests.post(self.url + self.request_uri,
-                        params=params_dict, headers=self.headers, timeout=3)
-            return r
+            return requests.post(full_url, params=params_dict,
+                                    headers=self.headers,
+                                    timeout=CONF.send_request_timeout)
         except requests.exceptions.RequestException as e:
-            print "send request to cloud monitor error, exception: %s" % e
+            LOG.error("Send data to %s error, exception: %s" % (full_url, e))
             return None
 
     def generate_stringToSign(self):
@@ -132,8 +147,8 @@ def notify_platform_partition_change(disk_partition_info, info_file_dict,
 
 class MemcacheClient(object):
     def __init__(self):
-        print "MemcacheClient init"
+        pass
 
     def report_heartbeat(self, uuid):
         if uuid:
-            print "+++++++++++++++instance %s is running" % uuid
+            LOG.debug("Instance %s is running" % uuid)
