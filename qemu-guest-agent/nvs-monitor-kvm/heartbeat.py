@@ -51,16 +51,14 @@ class HeartBeatThread(BaseThread):
                 LOG.info("domain is not active, uuid %s" % uuid)
                 continue
 
-            heartbeat_cmd = json.dumps({"execute": "guest-sync",
-                                        "arguments":
-                                            {"id": long(time.time())}})
+            heartbeat_cmd = json.dumps({"execute": "guest-ping"})
             response = self.helper.exec_qga_command(dom, heartbeat_cmd,
                                             timeout=CONF.heartbeat_cmd_timeout)
-            LOG.debug("Sync command response from qga: %s" % response)
+            LOG.debug("Ping command response from qga: %s" % response)
             if response:
                 self.sender.report_heartbeat(uuid)
             else:
-                LOG.warn("Sync command failed, uuid: %s" % uuid)
+                LOG.warn("Ping command failed, uuid: %s" % uuid)
 
         self.start()
         LOG.info("Heartbeat thread end")
