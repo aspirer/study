@@ -1,13 +1,27 @@
 ﻿
 import json
 import os
+import socket
 from xml.etree import ElementTree as ET
 
 from libvirt_qemu import libvirt
+from oslo.config import cfg
+
+util_opts = [
+    cfg.StrOpt('instances_path',
+               default='/var/lib/nova/instances/',
+               help='Where instances are stored on disk'),
+    ]
+
+CONF = cfg.CONF
+CONF.register_opts(util_opts)
 
 
-instances_path = "/var/lib/nova/instances/"
-
+def get_host_name():
+    try:
+        return socket.gethostname()
+    except socket.error:
+        return None
 
 
 def is_active(domain):
@@ -32,11 +46,10 @@ def get_domain_uuid(domain):
 
 
 def get_instance_dir(domain):
-    global instances_path
     try:
-        instance_dir = instances_path + get_domain_name(domain)
+        instance_dir = CONF.instances_path + get_domain_name(domain)
         if not os.path.exists(instance_dir):
-            instance_dir = instances_path + get_domain_uuid(domain)
+            instance_dir = CONF.instances_path + get_domain_uuid(domain)
 
         if not os.path.exists(instance_dir):
             return None

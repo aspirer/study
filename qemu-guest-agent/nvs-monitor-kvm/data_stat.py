@@ -8,15 +8,33 @@ from base_thread import BaseThread
 import instance
 import sender
 import utils
+from oslo.config import cfg
 
 RUN_DC = True
-monitor_delay = 60
-# `must` larger than 5s, default timeout of libvirt checking qga status is 5s
-read_file_time_out = 6
-temp_file_timeout = 30
-READ_BUF_LEN = 1024
-PERIOD_TIME = 60
-NET_CARD_LIST = ['eth0', ]
+
+
+data_stat_opts = [
+    cfg.IntOpt('monitor_delay',
+               default=60,
+               help='The interval seconds of collecting vm monitor data'),
+    cfg.IntOpt('read_file_time_out',
+               default=6,
+               help='The timeout seconds of reading file by qga, '
+                    'note that this value `must` larger than 5s, because '
+                    'the timeout of libvirt checking qga status is 5s'),
+    cfg.IntOpt('temp_file_timeout',
+               default=30,
+               help='The expired seconds of vm monitor temp data'),
+    cfg.IntOpt('read_buf_len',
+               default=1024,
+               help='The buffer length of reading file by qga'),
+    cfg.ListOpt('net_card_list',
+                default=['eth0'],
+                help='The NICs which need to collect monitor data'),
+    ]
+
+CONF = cfg.CONF
+CONF.register_opts(data_stat_opts)
 
 
 '''
@@ -48,7 +66,6 @@ class GetSystemUsage(object):
                 }
 
     def load_temp(self):
-        global temp_file_timeout
         temp_file = utils.get_instance_dir(self.domain) + "/temp"
         if os.path.exists(temp_file):
             try:
@@ -56,7 +73,8 @@ class GetSystemUsage(object):
                 with open(temp_file, 'r') as f:
                     temp_data = json.loads(f.read())
                 elapse = long(time.time()) - temp_data['timestamp']
-                if elapse >= 0 and elapse <= PERIOD_TIME + temp_file_timeout:
+                if (elapse >= 0 and
+                        elapse <= CONF.monitor_delay + CONF.temp_file_timeout):
                     for k,v in temp_data.iteritems():
                         if k in self.temp:
                             self.temp[k] = v
@@ -90,12 +108,11 @@ class GetSystemUsage(object):
 	}
     """
     def _read_file_from_guest(self, file, mode='r', read_eof=False):
-        global read_file_time_out
         cmd_open = json.dumps({"execute": "guest-file-open",
                                  "arguments": {"path": file, "mode": mode}})
 
         response = self.helper.exec_qga_command(self.domain, cmd_open,
-                                                timeout=read_file_time_out)
+                                            timeout=CONF.read_file_time_out)
         if response:
             print "open file response: %s" % response
             try:
@@ -110,15 +127,14 @@ class GetSystemUsage(object):
         if not handle:
             return None
 
-        global READ_BUF_LEN
         cmd_read = json.dumps({"execute": "guest-file-read",
                                "arguments": {"handle": handle,
-                                             "count": READ_BUF_LEN}})
+                                             "count": CONF.read_buf_len}})
         read_file_b64 = None
         eof = False
         while not eof:
             response = self.helper.exec_qga_command(self.domain, cmd_read,
-                                                    timeout=read_file_time_out)
+                                            timeout=CONF.read_file_time_out)
             if response:
                 print "read file response: %s" % response
                 try:
@@ -140,7 +156,7 @@ class GetSystemUsage(object):
         cmd_close = json.dumps({"execute": "guest-file-close",
                                 "arguments": {"handle": handle}})
         self.helper.exec_qga_command(self.domain, cmd_close,
-                                    timeout=read_file_time_out)
+                                     timeout=CONF.read_file_time_out)
 
         if not read_file_b64:
             return None
@@ -248,12 +264,11 @@ class GetSystemUsage(object):
                     }
         '''
         def _get_disk_realpath(path):
-            global read_file_time_out
             cmd_realpath = json.dumps({"execute": "guest-get-realpath",
                                        "arguments": {"path": path}})
 
             response = self.helper.exec_qga_command(self.domain, cmd_realpath,
-                                                timeout=read_file_time_out)
+                                            timeout=CONF.read_file_time_out)
             if response:
                 print "get realpath response: %s" % response
                 try:
@@ -314,7 +329,7 @@ class GetSystemUsage(object):
             cmd_statvfs = json.dumps({"execute": "guest-get-statvfs",
                                       "arguments": {"path": path}})
             response = self.helper.exec_qga_command(self.domain, cmd_statvfs,
-                                                    timeout=read_file_time_out)
+                                            timeout=CONF.read_file_time_out)
             if response:
                 print "open file response: %s" % response
                 try:
@@ -412,7 +427,6 @@ class GetSystemUsage(object):
                                                       'partition_usage': 15}}
                      }
         '''
-        global PERIOD_TIME
         now_disk_data = self._get_disk_data()
         write_request_period_time = now_disk_data['disk_write_request'] \
                                     - self.temp['disk_write_request']
@@ -424,13 +438,13 @@ class GetSystemUsage(object):
             read_request_period_time = 1
 
         disk_write_rate = float(now_disk_data['disk_write'] - \
-                                self.temp['disk_write']) / PERIOD_TIME
+                                self.temp['disk_write']) / CONF.monitor_delay
         disk_read_rate = float(now_disk_data['disk_read'] - \
-                               self.temp['disk_read']) / PERIOD_TIME
+                               self.temp['disk_read']) / CONF.monitor_delay
         disk_write_request = float(now_disk_data['disk_write_request'] - \
-                self.temp['disk_write_request']) / PERIOD_TIME
+                self.temp['disk_write_request']) / CONF.monitor_delay
         disk_read_request = float(now_disk_data['disk_read_request'] - \
-                self.temp['disk_read_request']) / PERIOD_TIME
+                self.temp['disk_read_request']) / CONF.monitor_delay
         disk_write_delay = float(now_disk_data['disk_write_delay'] - \
             self.temp['disk_write_delay']) / float(write_request_period_time)
         disk_read_delay = float(now_disk_data['disk_read_delay'] - \
@@ -485,7 +499,6 @@ class GetSystemUsage(object):
             Split the grep result and divide it into list.
             @return: ['10.120.0.1', '123', '123']
         '''
-        global NET_CARD_LIST
         receive_bytes = 0L
         transfer_bytes = 0L
         receive_packages = 0L
@@ -501,7 +514,7 @@ class GetSystemUsage(object):
         for network_line in network_lines:
             network_datas = network_line.replace(':', ' ').split()
             try:
-                if network_datas[0] in NET_CARD_LIST:
+                if network_datas[0] in CONF.net_card_list:
                     receive_bytes += long(network_datas[1])
                     receive_packages += long(network_datas[2])
                     transfer_bytes += long(network_datas[9])
@@ -521,15 +534,14 @@ class GetSystemUsage(object):
                       'transfer_rate': 0.0
                     }
         '''
-        global PERIOD_TIME
         old_receive_bytes = self.temp['network_receive_bytes']
         old_transfer_bytes = self.temp['network_transfer_bytes']
         now_receive_bytes, now_transfer_bytes = \
                                     self._get_network_flow_data()
         receive_rate = float(now_receive_bytes - old_receive_bytes) \
-                                            / 1024 / PERIOD_TIME
+                                            / 1024 / CONF.monitor_delay
         transfer_rate = float(now_transfer_bytes - old_transfer_bytes) \
-                                            / 1024 / PERIOD_TIME
+                                            / 1024 / CONF.monitor_delay
         if receive_rate < 0 or transfer_rate < 0:
             receive_rate = 0
             transfer_rate = 0
@@ -673,8 +685,7 @@ class DataFormater(object):
 class MonitorThread(BaseThread):
     def __init__(self):
         super(MonitorThread, self).__init__()
-        global monitor_delay
-        self.delay = monitor_delay
+        self.delay = CONF.monitor_delay
 
     def _run(self):
         global RUN_DC
