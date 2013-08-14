@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<services>
+	<service name="DDB" resource_type='RDS'>
+		<metric name="cpuUsage" unit="Percent"/>
+		<metric name="memUsage" unit="Megabytes"/>
+		<metric name="networkReceive" unit="Kilobytes/Second">
+			<aggregation name="DDB(RDSBelongsTo)"/>
+			<aggregation name="RDSALL"/>
+		</metric>
+		<metric name="networkTransfer" unit="Kilobytes/Second">
+			<aggregation name="DDB(RDSBelongsTo)"/>
+			<aggregation name="RDSALL"/>
+		</metric>
+		<metric name="diskUsage" unit="Megabytes">
+			<aggregation name="DDB(RDSBelongsTo)"/>
+			<aggregation name="RDSALL"/>
+		</metric>
+		<metric name="diskReadRequest" unit="Count/Second">
+			<aggregation name="DDB(RDSBelongsTo)"/>
+			<aggregation name="RDSALL"/>
+		</metric>
+		<metric name="diskWriteRequest" unit="Count/Second">
+			<aggregation name="DDB(RDSBelongsTo)"/>
+			<aggregation name="RDSALL"/>
+		</metric>
+		<metric name="diskReadRate" unit="Kilobytes/Second">
+			<aggregation name="DDB(RDSBelongsTo)"/>
+			<aggregation name="RDSALL"/>
+		</metric>
+		<metric name="diskWriteRate" unit="Kilobytes/Second">
+			<aggregation name="DDB(RDSBelongsTo)"/>
+			<aggregation name="RDSALL"/>
+		</metric>
+		<metric name="diskReadDelay" unit="Milliseconds/Count">
+			<aggregation name="DDB(RDSBelongsTo)"/>
+			<aggregation name="RDSALL"/>
+		</metric>
+		<metric name="diskWriteDelay" unit="Milliseconds/Count">
+			<aggregation name="DDB(RDSBelongsTo)"/>
+			<aggregation name="RDSALL"/>
+		</metric>
+	</service>
+	<service name="DDB" resource_type='SQLPxyServer'>
+		<metric name="cpuUsage" unit="Percent"/>
+		<metric name="memUsage" unit="Megabytes"/>
+		<metric name="networkReceive" unit="Kilobytes/Second">
+			<aggregation name="DDB(SQLPxyServerBelongsTo)"/>
+			<aggregation name="SQLPxyServerALL"/>
+		</metric>
+		<metric name="networkTransfer" unit="Kilobytes/Second">
+			<aggregation name="DDB(SQLPxyServerBelongsTo)"/>
+			<aggregation name="SQLPxyServerALL"/>
+		</metric>
+	</service>
+	<service name="RDS" resource_type='RDS'>
+		<metric name="cpuUsage" unit="Percent"/>
+		<metric name="memUsage" unit="Megabytes"/>
+		<metric name="networkReceive" unit="Kilobytes/Second">
+			<aggregation name="RDSALL"/>
+		</metric>
+		<metric name="networkTransfer" unit="Kilobytes/Second">
+			<aggregation name="RDSALL"/>
+		</metric>
+		<metric name="diskUsage" unit="Megabytes"/>
+		<metric name="diskReadRequest" unit="Count/Second"/>
+		<metric name="diskWriteRequest" unit="Count/Second"/>
+		<metric name="diskReadRate" unit="Kilobytes/Second">
+			<aggregation name="RDSALL"/>
+		</metric>
+		<metric name="diskWriteRate" unit="Kilobytes/Second">
+			<aggregation name="RDSALL"/>
+		</metric>
+		<metric name="diskReadDelay" unit="Milliseconds/Count"/>
+		<metric name="diskWriteDelay" unit="Milliseconds/Count"/>
+	</service>
+	<service name="NCS" resource_type='vm'>
+		<metric name="cpuUsage" unit="Percent"/>
+		<metric name="memUsage" unit="Megabytes"/>
+		<metric name="networkReceive" unit="Kilobytes/Second"/>
+		<metric name="networkTransfer" unit="Kilobytes/Second"/>
+		<metric name="diskUsage" unit="Megabytes"/>
+		<metric name="diskReadRequest" unit="Count/Second"/>
+		<metric name="diskWriteRequest" unit="Count/Second"/>
+		<metric name="diskReadRate" unit="Kilobytes/Second"/>
+		<metric name="diskWriteRate" unit="Kilobytes/Second"/>
+		<metric name="diskReadDelay" unit="Milliseconds/Count"/>
+		<metric name="diskWriteDelay" unit="Milliseconds/Count"/>
+		<metric name="memUsageRate" unit="Percent"/>
+	</service>
+	<service name="openstack" resource_type='openstack'>
+		<metric name="cpuUsage" unit="Percent"/>
+		<metric name="memUsage" unit="Megabytes"/>
+		<metric name="networkReceive" unit="Kilobytes/Second"/>
+		<metric name="networkTransfer" unit="Kilobytes/Second"/>
+		<metric name="diskUsage" unit="Megabytes"/>
+		<metric name="diskReadRequest" unit="Count/Second"/>
+		<metric name="diskWriteRequest" unit="Count/Second"/>
+		<metric name="diskReadRate" unit="Kilobytes/Second"/>
+		<metric name="diskWriteRate" unit="Kilobytes/Second"/>
+		<metric name="diskReadDelay" unit="Milliseconds/Count"/>
+		<metric name="diskWriteDelay" unit="Milliseconds/Count"/>
+		<metric name="diskPartition" unit="all partitions infos"/>
+		<metric name="loadavg_5" unit="Percent"/>
+		<metric name="memUsageRate" unit="Percent"/>
+	</service>
+</services>

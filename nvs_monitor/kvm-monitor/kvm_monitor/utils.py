@@ -17,7 +17,7 @@ util_opts = [
                default='/etc/nvs_monitor/',
                help='Where the conf files of nvs monitor are stored on disk'),
     cfg.StrOpt('monitor_setting_file_name',
-               default='monitor_setting.xml',
+               default='monitor-metrics.xml',
                help='The file name of monitor metrics setting'),
     cfg.StrOpt('info_file_name',
                default='info',

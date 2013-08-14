@@ -1,0 +1,7 @@
+/data/log/nvs/lxc-monitor.log {
+    daily
+    missingok
+    rotate 30
+    compress
+    delaycompress
+}

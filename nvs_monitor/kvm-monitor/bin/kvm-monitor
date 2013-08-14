@@ -6,9 +6,9 @@ import time
 
 from oslo.config import cfg
 
-import heartbeat
-import data_stat
-import log
+from kvm_monitor import data_stat
+from kvm_monitor import heartbeat
+from kvm_monitor import log
 
 global_opts = [
     cfg.BoolOpt('enable_monitor',
