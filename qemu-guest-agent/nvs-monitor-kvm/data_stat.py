@@ -18,7 +18,7 @@ data_stat_opts = [
                help='The interval seconds of collecting vm monitor data'),
     cfg.StrOpt('temp_file_name',
                default='temp',
-               help='The interval seconds of collecting vm monitor data'),
+               help='The file name of vm monitor temp data'),
     cfg.IntOpt('read_file_time_out',
                default=6,
                help='The timeout seconds of reading file by qga, '
@@ -52,8 +52,6 @@ class GetSystemUsage(object):
     def __init__(self, domain, helper):
         self.domain = domain
         self.helper = helper
-
-        print "init temp file"
         self.temp = {
                     'total_cpu_time': 0L,
                     'last_cpu_idle_time': 0L,
@@ -698,6 +696,7 @@ class MonitorThread(BaseThread):
     @staticmethod
     def stop():
         MonitorThread.RUN_TH = False
+        LOG.debug("Set RUN_TH to False")
 
     def _update_instances(self):
         db_instances = instance.get_all_instances_on_host()
@@ -733,6 +732,10 @@ class MonitorThread(BaseThread):
         LOG.info("Monitor thread start")
         monitor_domains_with_project_id = self._update_instances()
         for (dom, project_id) in monitor_domains_with_project_id:
+            if not self.RUN_TH:
+                LOG.info("Break from monitor thread")
+                break
+
             uuid = utils.get_domain_uuid(dom)
             if not uuid:
                 LOG.warn("Get domain uuid failed")
@@ -796,5 +799,4 @@ class MonitorThread(BaseThread):
             else:
                 LOG.info("First start or temp file is expired, %s" % uuid)
 
-        self.start()
         LOG.info("Monitor thread end")

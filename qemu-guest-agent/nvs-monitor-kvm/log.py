@@ -5,27 +5,19 @@ from oslo.config import cfg
 log_opts = [
     cfg.StrOpt('log_level',
                default='DEBUG',
-               help='The interval seconds of collecting vm monitor data'),
+               help='The log level of nvs monitor'),
     cfg.StrOpt('log_dir',
                default='./',
-               help='The timeout seconds of getting heartbeat by qga, '
-                    'note that this value `must` larger than 5s, because '
-                    'the timeout of libvirt checking qga status is 5s'),
+               help='Where the log file is stored on the disk'),
     cfg.StrOpt('log_file',
                default='monitor.log',
-               help='The timeout seconds of getting heartbeat by qga, '
-                    'note that this value `must` larger than 5s, because '
-                    'the timeout of libvirt checking qga status is 5s'),
+               help='The file name of nvs monitor log'),
     cfg.StrOpt('log_format',
                default='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
-               help='The timeout seconds of getting heartbeat by qga, '
-                    'note that this value `must` larger than 5s, because '
-                    'the timeout of libvirt checking qga status is 5s'),
+               help='The log output format'),
     cfg.StrOpt('log_date_format',
                default=None,
-               help='The timeout seconds of getting heartbeat by qga, '
-                    'note that this value `must` larger than 5s, because '
-                    'the timeout of libvirt checking qga status is 5s'),
+               help='The data-time output format of log'),
     ]
 
 CONF = cfg.CONF

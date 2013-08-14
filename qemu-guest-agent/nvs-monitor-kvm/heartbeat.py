@@ -13,7 +13,7 @@ import utils
 heartbeat_opts = [
     cfg.IntOpt('heartbeat_delay',
                default=5,
-               help='The interval seconds of collecting vm monitor data'),
+               help='The interval seconds of reporting vm heartbeat'),
     cfg.IntOpt('heartbeat_cmd_timeout',
                default=6,
                help='The timeout seconds of getting heartbeat by qga, '
@@ -37,11 +37,16 @@ class HeartBeatThread(BaseThread):
     @staticmethod
     def stop():
         HeartBeatThread.RUN_TH = False
+        LOG.debug("Set RUN_TH to False")
 
     def serve(self):
         LOG.info("Heartbeat thread start")
         domains = self.helper.list_all_domains()
         for dom in domains:
+            if not self.RUN_TH:
+                LOG.info("Break from hearbeat thread")
+                break
+
             uuid = utils.get_domain_uuid(dom)
             if not uuid:
                 LOG.warn("Get domain uuid failed")
@@ -60,5 +65,4 @@ class HeartBeatThread(BaseThread):
             else:
                 LOG.warn("Ping command failed, uuid: %s" % uuid)
 
-        self.start()
         LOG.info("Heartbeat thread end")

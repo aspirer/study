@@ -13,6 +13,15 @@ util_opts = [
     cfg.StrOpt('instances_path',
                default='/var/lib/nova/instances/',
                help='Where instances are stored on disk'),
+    cfg.StrOpt('config_path',
+               default='/etc/nvs_monitor/',
+               help='Where the conf files of nvs monitor are stored on disk'),
+    cfg.StrOpt('monitor_setting_file_name',
+               default='monitor_setting.xml',
+               help='The file name of monitor metrics setting'),
+    cfg.StrOpt('info_file_name',
+               default='info',
+               help='The file name of instance info'),
     ]
 
 CONF = cfg.CONF
@@ -55,9 +64,11 @@ def get_domain_uuid(domain):
 
 def get_instance_dir(domain):
     try:
-        instance_dir = CONF.instances_path + get_domain_name(domain)
+        instance_dir = os.path.join(CONF.instances_path,
+                                    get_domain_name(domain))
         if not os.path.exists(instance_dir):
-            instance_dir = CONF.instances_path + get_domain_uuid(domain)
+            instance_dir = os.path.join(CONF.instances_path,
+                                        get_domain_uuid(domain))
 
         if not os.path.exists(instance_dir):
             LOG.error("Get instance dir failed")
@@ -71,7 +82,7 @@ def get_instance_dir(domain):
 
 def get_info_file_dict(domain, project_id):
     try:
-        info_file = get_instance_dir(domain) + "/info"
+        info_file = os.path.join(get_instance_dir(domain), CONF.info_file_name)
         with open(info_file, 'r') as f:
             info_dict = json.loads(f.read())
 
@@ -95,7 +106,8 @@ def get_info_file_dict(domain, project_id):
 
 def get_monitor_setting_root(domain):
     try:
-        monitor_setting_file = get_instance_dir(domain) + "/monitor_setting.xml"
+        monitor_setting_file = os.path.join(CONF.config_path,
+                                    CONF.monitor_setting_file_name)
         return ET.parse(monitor_setting_file)
     except (ET.ParseError, IOError, TypeError) as e:
         LOG.error("Parse monitor setting file failed, exception: %s" % e)

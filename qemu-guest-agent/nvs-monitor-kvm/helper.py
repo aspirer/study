@@ -5,11 +5,18 @@ import threading
 
 import log
 
-_LIBVIRT_CONN = libvirt.open(None)
+LOG = log.getLogger(__name__)
+
+
+try:
+    LOG.info("Initing libvirt connection")
+    _LIBVIRT_CONN = libvirt.open(None)
+except libvirt.libvirtError as e:
+    LOG.error("Init connection to libvirt failed, exception: %s" % e)
+    raise e
 
 CONN_LOCK = threading.RLock()
 
-LOG = log.getLogger(__name__)
 
 class LibvirtQemuHelper(object):
     def __init__(self):

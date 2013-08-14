@@ -11,7 +11,7 @@ from oslo.config import cfg
 sender_opts = [
     cfg.IntOpt('send_request_timeout',
                default=5,
-               help='The timeout seconds of getting instances by nova api'),
+               help='The timeout seconds of sending data to cloud monitor'),
     ]
 
 CONF = cfg.CONF
