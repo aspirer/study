@@ -1,5 +1,7 @@
 ﻿
 import logging
+import os
+
 from oslo.config import cfg
 
 log_opts = [
@@ -7,10 +9,10 @@ log_opts = [
                default='DEBUG',
                help='The log level of nvs monitor'),
     cfg.StrOpt('log_dir',
-               default='./',
+               default='/var/log/nvs/',
                help='Where the log file is stored on the disk'),
     cfg.StrOpt('log_file',
-               default='monitor.log',
+               default='kvm-monitor.log',
                help='The file name of nvs monitor log'),
     cfg.StrOpt('log_format',
                default='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
@@ -36,7 +38,7 @@ logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
 
 # create file handler which logs even debug messages
-fh = logging.FileHandler(CONF.log_dir + CONF.log_file)
+fh = logging.FileHandler(os.path.join(CONF.log_dir, CONF.log_file))
 
 if CONF.log_level not in LEVEL_MAP:
     CONF.log_level = 'DEBUG'

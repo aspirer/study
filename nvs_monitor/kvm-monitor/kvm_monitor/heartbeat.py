@@ -11,9 +11,6 @@ import utils
 
 
 heartbeat_opts = [
-    cfg.IntOpt('heartbeat_delay',
-               default=5,
-               help='The interval seconds of reporting vm heartbeat'),
     cfg.IntOpt('heartbeat_cmd_timeout',
                default=6,
                help='The timeout seconds of getting heartbeat by qga, '
@@ -30,7 +27,6 @@ LOG = log.getLogger(__name__)
 class HeartBeatThread(BaseThread):
     def __init__(self):
         super(HeartBeatThread, self).__init__()
-        self.delay = CONF.heartbeat_delay
         self.sender = sender.MemcacheClient()
         self.qga_cmd = {"execute": "guest-sync", "arguments": {"id": 0}}
 

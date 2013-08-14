@@ -17,6 +17,12 @@ global_opts = [
     cfg.BoolOpt('enable_heartbeat',
                default=True,
                help='Enable reporting vm heartbeat'),
+    cfg.IntOpt('heartbeat_delay',
+               default=5,
+               help='The interval seconds of reporting vm heartbeat'),
+    cfg.IntOpt('monitor_delay',
+               default=60,
+               help='The interval seconds of collecting vm monitor data'),
     cfg.FloatOpt('check_interval',
                 default=0.5,
                 help='The interval time to check run thread or not'),
@@ -29,9 +35,7 @@ LOG = log.getLogger(__name__)
 
 RUN = True
 
-
 def signal_handler(signum, frame):
-    LOG.info("Receive signal: %s" % signum)
     global RUN
     RUN = False
     heartbeat.HeartBeatThread.stop()
@@ -43,38 +47,65 @@ def main():
     LOG.info("Enable heartbeat: %s" % CONF.enable_heartbeat)
     LOG.info("Enable monitor: %s" % CONF.enable_monitor)
 
-    # create the heartbeat thread
+    heartbeat_thr = None
     if CONF.enable_heartbeat:
         heartbeat_thr = heartbeat.HeartBeatThread()
 
-    # create the monitor data collect thread
+    data_stat_thr = None
     if CONF.enable_monitor:
         data_stat_thr = data_stat.MonitorThread()
 
+    hb_thr = None
+    ds_thr = None
     while RUN:
-        if CONF.enable_heartbeat and isinstance(heartbeat_thr,
-                    heartbeat.HeartBeatThread):
-            heartbeat_thr.start()
+        # create the heartbeat thread
+        if heartbeat_thr and (long(time.time()) -
+                heartbeat_thr.last_run_time >= CONF.heartbeat_delay):
+            if hb_thr is None or not hb_thr.is_alive():
+                hb_thr = heartbeat_thr.start()
+                heartbeat_thr.last_run_time = long(time.time())
+            else:
+                LOG.warn("heatbeat thread is still running after waiting %s" %
+                        CONF.heartbeat_delay)
 
-        if CONF.enable_monitor and isinstance(data_stat_thr,
-                    data_stat.MonitorThread):
-            data_stat_thr.start()
+        # create the monitor data collect thread
+        if data_stat_thr and (long(time.time()) -
+                data_stat_thr.last_run_time >= CONF.monitor_delay):
+            if ds_thr is None or not ds_thr.is_alive():
+                ds_thr = data_stat_thr.start()
+                data_stat_thr.last_run_time = long(time.time())
+            else:
+                LOG.warn("monitor thread is still running after waiting %s" %
+                        CONF.monitor_delay)
 
         time.sleep(CONF.check_interval)
+
+    still_run = False
+    if hb_thr:
+        hb_thr.join(1)
+        if hb_thr.is_alive():
+            still_run = True
+            LOG.warn("heatbeat thread is still running")
+    if ds_thr:
+        ds_thr.join(1)
+        if ds_thr.is_alive():
+            still_run = True
+            LOG.warn("monitor thread is still running")
+
+    if still_run:
+        # os.kill()
+        pass
 
 
 # main entry
 if __name__ == "__main__":
-    LOG.info("Start monitor")
     # signal handle
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
-
-    # daemonize()
+    LOG.info("Start monitor")
 
     LOG.info("loading config files: %s" % sys.argv[2:])
     CONF(sys.argv[1:])
-    #import ipdb;ipdb.set_trace()
-    main()
 
-    LOG.info("Nvs monitor is stopped")
+    main()
+    LOG.info("Exit monitor")

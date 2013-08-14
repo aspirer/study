@@ -1,6 +1,7 @@
 
 import base64
 import json
+import signal
 import os
 
 import time
@@ -13,9 +14,6 @@ from oslo.config import cfg
 
 
 data_stat_opts = [
-    cfg.IntOpt('monitor_delay',
-               default=60,
-               help='The interval seconds of collecting vm monitor data'),
     cfg.StrOpt('temp_file_name',
                default='temp',
                help='The file name of vm monitor temp data'),
@@ -687,11 +685,9 @@ class DataFormater(object):
         return metric_datas
 
 
-
 class MonitorThread(BaseThread):
     def __init__(self):
         super(MonitorThread, self).__init__()
-        self.delay = CONF.monitor_delay
 
     @staticmethod
     def stop():
