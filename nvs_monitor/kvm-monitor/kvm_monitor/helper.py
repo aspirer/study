@@ -21,25 +21,15 @@ AUTH = [[libvirt.VIR_CRED_AUTHNAME,
          libvirt.VIR_CRED_EXTERNAL],
         _connect_auth_cb,
         None]
-try:
-    LOG.info("Initing libvirt auth connection")
-    _LIBVIRT_CONN = libvirt.openAuth('qemu:///system', AUTH, 0)
-    LOG.info("Inited auth connection to libvirt, version: %s" %
-                _LIBVIRT_CONN.getLibVersion())
-except libvirt.libvirtError as e:
-    LOG.error("Init auth connection to libvirt failed, exception: %s" % e)
-    raise e
+
+_LIBVIRT_CONN = None
 
 CONN_LOCK = threading.RLock()
 
 
 class LibvirtQemuHelper(object):
     def __init__(self):
-        global _LIBVIRT_CONN
-        if _LIBVIRT_CONN:
-            self._conn = _LIBVIRT_CONN
-        else:
-            self._conn = None
+        self._get_conn()
 
     def _get_conn(self):
         LOG.info("Getting new libvirt auth connection")
