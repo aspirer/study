@@ -165,7 +165,9 @@ class GetSystemUsage(object):
             return None
 
         try:
-            return base64.decodestring(read_file_b64)
+            read_file = base64.decodestring(read_file_b64)
+            LOG.debug("File %s contents: %s" % (file, read_file))
+            return read_file
         except binascii.Error as e:
             LOG.warn("Base64 decode failed, exception: %s" % e)
             return None

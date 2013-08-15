@@ -47,6 +47,10 @@ def main():
     LOG.info("Enable heartbeat: %s" % CONF.enable_heartbeat)
     LOG.info("Enable monitor: %s" % CONF.enable_monitor)
 
+    if not CONF.enable_heartbeat and not CONF.enable_monitor:
+        LOG.info("No task to do, exit kvm monitor now")
+        return
+
     heartbeat_thr = None
     if CONF.enable_heartbeat:
         heartbeat_thr = heartbeat.HeartBeatThread()
@@ -85,16 +89,16 @@ def main():
         hb_thr.join(1)
         if hb_thr.is_alive():
             still_run = True
-            LOG.warn("heatbeat thread is still running")
+            LOG.warn("Heatbeat thread is still running")
     if ds_thr:
         ds_thr.join(1)
         if ds_thr.is_alive():
             still_run = True
-            LOG.warn("monitor thread is still running")
+            LOG.warn("Monitor thread is still running")
 
     if still_run:
-        # os.kill()
-        pass
+        LOG.warn("Kill self now")
+        os.kill(0, signal.SIGKILL)
 
 
 # main entry
@@ -104,7 +108,7 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
     LOG.info("Start monitor")
 
-    LOG.info("loading config files: %s" % sys.argv[2:])
+    LOG.info("Loading config files: %s" % sys.argv[2:])
     CONF(sys.argv[1:])
 
     main()

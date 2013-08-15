@@ -17,7 +17,7 @@ PATH=/sbin:/usr/sbin:/bin:/usr/bin
 DESC="NVS monitor for KVM"
 NAME=kvm-monitor
 DAEMON=/usr/bin/kvm-monitor
-DAEMON_ARGS="--config-file=/etc/nvs_monitor/kvm-monitor.conf"
+DAEMON_ARGS="--config-file /etc/nvs_monitor/kvm-monitor.conf"
 PIDFILE=/var/run/$NAME.pid
 SCRIPTNAME=/etc/init.d/$NAME
 NOVA_USER=nova
