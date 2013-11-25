@@ -1,0 +1,270 @@
+diff --git a/nova/compute/manager.py b/nova/compute/manager.py
+index 9152976..994f28b 100644
+--- a/nova/compute/manager.py
++++ b/nova/compute/manager.py
+@@ -1048,7 +1048,10 @@ class ComputeManager(manager.SchedulerDependentManager):
+             raise exception.BuildAbortException(
+                 instance_uuid=instance['uuid'],
+                 reason=msg)
+-        except exception.UnexpectedTaskStateError as e:
++        except (exception.UnexpectedTaskStateError,
++                exception.InstanceTypeVcpusTooLarge,
++                exception.InvalidImageProperty,
++                exception.NoValidVcpuTopology) as e:
+             # Don't try to reschedule, just log and reraise.
+             with excutils.save_and_reraise_exception():
+                 LOG.debug(e.format_message(), instance=instance)
+diff --git a/nova/exception.py b/nova/exception.py
+index 12e7007..86ce69b 100644
+--- a/nova/exception.py
++++ b/nova/exception.py
+@@ -1477,3 +1477,15 @@ class PciDeviceUnsupportedHypervisor(NovaException):
+ 
+ class KeyManagerError(NovaException):
+     msg_fmt = _("key manager error: %(reason)s")
++
++
++class InstanceTypeVcpusTooLarge(NovaException):
++    msg_fmt = _("Instance type's vcpus is too large for requested hypervisor.")
++
++
++class InvalidImageProperty(Invalid):
++    msg_fmt = _("Invalid image property %(property)s.")
++
++
++class NoValidVcpuTopology(NovaException):
++    msg_fmt = _("No valid vcpu topology was found. %(reason)s")
+diff --git a/nova/virt/driver.py b/nova/virt/driver.py
+index 878014e..f5dd366 100644
+--- a/nova/virt/driver.py
++++ b/nova/virt/driver.py
+@@ -26,6 +26,7 @@ import sys
+ 
+ from oslo.config import cfg
+ 
++from nova import exception
+ from nova.openstack.common.gettextutils import _
+ from nova.openstack.common import importutils
+ from nova.openstack.common import log as logging
+@@ -1069,75 +1070,99 @@ class ComputeDriver(object):
+         """Default the missing device names in the block device mapping."""
+         raise NotImplementedError()
+ 
+-    def caculate_vcpu_topology(self, vcpus, topology_config):
+-        """
+-        Caculate vcpu topology for instance.
+-
+-        :param vcpus: Number of vcpus of the intance
+-        :param topology_config: A dict contains max sockets, max cores and
+-            max threads that instance can be used, where max cores means max
+-            cores per socket, max threads means max threads per core.
+-
+-        :return: A dict contains the vcpu topology of instance, eg.
+-                 {'sockets': 2, 'cores': 2, 'threads': 1}.
+-        """
+-        max_sockets = topology_config['max_sockets']
+-        max_cores = topology_config['max_cores']
+-        max_threads = topology_config['max_threads']
+-
+-        # The default value of max threads is 1
+-        if max_threads is None:
+-            max_threads = 1
+-
+-        if max_threads > 2:
+-            LOG.warn(_("The max threads of vcpu must less than or equal to 2"))
+-            max_threads = 2
+-
+-        if max_sockets is None:
+-            # If the max sockets is not set, we use vcpus as sockets,
+-            # set both max cores and threads to 1
+-            max_sockets = vcpus
+-            max_cores = 1
+-            max_threads = 1
+-
+-        vcpu_topology = {'sockets': vcpus, 'cores': 1, 'threads': 1}
+-        if max_cores is not None:
+-            if max_sockets * max_cores * max_threads < vcpus:
+-                LOG.error(_("Invalid cpu topology in image property"))
+-                return vcpu_topology
+-
+-            if max_sockets * max_cores * max_threads == vcpus:
+-                vcpu_topology['sockets'] = max_sockets
+-                vcpu_topology['cores'] = max_cores
+-                vcpu_topology['threads'] = max_threads
+-                return vcpu_topology
+-
+-        # Use the max sockets and threads as the topology of vcpus by default
+-        cores = vcpus / (max_sockets * max_threads)
+-        sockets = max_sockets
+-        threads = max_threads
+-        # If the vcpus number is not enough, use the max sockets,
+-        # and set threads to 1 in the topology
+-        if sockets * cores * threads != vcpus:
+-            cores = vcpus / max_sockets
+-            sockets = max_sockets
+-            threads = 1
+-        # If the vcpus number is still not enough, or the vcpus in topology
+-        # is not equal to the one in the instance type, use max cores and
+-        # set both sockets and threads to 1
+-        if sockets * cores * threads != vcpus:
+-            cores = vcpus
+-            sockets = 1
+-            threads = 1
+-
+-        vcpu_topology['sockets'] = sockets
+-        # The number of threads should less than or equal to cores
+-        vcpu_topology['cores'] = max(cores, threads)
+-        vcpu_topology['threads'] = min(cores, threads)
+-
+-        return vcpu_topology
+-
+-    def parse_topology_config(self, image_meta):
++    def get_guest_cpu_topology(self, inst_type, image_meta, preferred_topology,
++                               mandatory_topology):
++        """
++        Calculate the list of all possible valid topologies for configuring
++        guest machine CPU topology within the given constraints. The caller
++        should choose one element from the returned list to use as the
++        topology. The returned list will be ordered such that it prefers
++        sockets, over cores, over threads.
++
++        :param inst_type: Object returned from a
++               self.virtapi.instance_type_get() call. Used to determine max
++               vCPU count.
++        :param image_meta: The metadata dict for the root disk image.
++        :param preferred_topology: Dict containing three keys: max_sockets,
++               max_cores, max_threads, where max_cores means max cores per
++               socket, max_threads means max threads per core.
++        :param mandatory_topology: Dict containing three keys: max_sockets,
++               max_cores, max_threads, where max_cores means max cores per
++               socket, max_threads means max threads per core. Note that the
++               elements in mandatory topology _MUST_ be more than or equal to
++               the one in preferred topology.
++
++        Returns list of dicts. Each dict containing three keys: sockets, cores,
++        threads.
++        """
++        total_vcpus = inst_type['vcpus']
++
++        # Check the mandatory topology has enough vCPUs or not
++        max_supported_vcpus = (mandatory_topology['max_sockets'] *
++                               mandatory_topology['max_cores'] *
++                               mandatory_topology['max_threads'])
++        if max_supported_vcpus < total_vcpus:
++            raise exception.InstanceTypeVcpusTooLarge()
++
++        topology_config = self._parse_topology_config(image_meta)
++        # Padding the blank topology setting in image property with mandatory
++        # topology.
++        for key in ('max_sockets', 'max_cores', 'max_threads'):
++            if topology_config[key] is None:
++                topology_config[key] = mandatory_topology[key]
++
++        hard_limit_sockets = min(topology_config['max_sockets'],
++                                 max(preferred_topology['max_sockets'],
++                                     mandatory_topology['max_sockets']))
++        hard_limit_cores = min(topology_config['max_cores'],
++                               max(preferred_topology['max_cores'],
++                                   mandatory_topology['max_cores']))
++        hard_limit_threads = min(topology_config['max_threads'],
++                                 max(preferred_topology['max_threads'],
++                                     mandatory_topology['max_threads']))
++
++        # Caculate the preferred topologies
++        preferred_cpu_topologies = []
++        max_preferred_sockets = min(hard_limit_sockets,
++                                    preferred_topology['max_sockets'],
++                                    total_vcpus)
++        max_preferred_cores = min(hard_limit_cores,
++                                  preferred_topology['max_cores'],
++                                  total_vcpus)
++        max_preferred_threads = min(hard_limit_threads,
++                                    preferred_topology['max_threads'],
++                                    total_vcpus)
++        for threads in range(1, max_preferred_threads + 1):
++            for cores in range(1, max_preferred_cores + 1):
++                for sockets in range(1, max_preferred_sockets + 1):
++                    if sockets * cores * threads == total_vcpus:
++                        sorted_cpu_topologies.append(dict(sockets=sockets,
++                                                          cores=cores,
++                                                          threads=threads))
++
++        if len(preferred_cpu_topologies) > 0:
++            return preferred_cpu_topologies
++
++        # Caculate the usable topologies
++        usable_cpu_topologies = []
++        all_usable_sockets = min(hard_limit_sockets, total_vcpus)
++        all_usable_cores = min(hard_limit_cores, total_vcpus)
++        all_usable_threads = min(hard_limit_threads, total_vcpus)
++        for threads in range(1, all_usable_threads + 1):
++            for cores in range(1, all_usable_cores + 1):
++                for sockets in range(1, all_usable_sockets + 1):
++                    if sockets * cores * threads == total_vcpus:
++                        topology = dict(sockets=sockets,
++                                        cores=cores,
++                                        threads=threads)
++                        if topology not in sorted_cpu_topologies:
++                            sorted_cpu_topologies.append(dict(sockets=sockets,
++                                                              cores=cores,
++                                                              threads=threads))
++
++        return usable_cpu_topologies
++
++    def _parse_topology_config(self, image_meta):
+         topology = {'max_sockets': None, 'max_cores': None,
+                     'max_threads': None}
+ 
+@@ -1147,16 +1172,17 @@ class ComputeDriver(object):
+             hw_cpu_topology = image_meta['properties']['hw_cpu_topology']
+             try:
+                 for top in hw_cpu_topology.split(','):
+-                    key, value = top.split(':')
++                    key, value = top.split('=')
+                     key = key.strip()
+                     if key in topology and int(value) > 0:
+                         topology[key] = int(value)
++                        if key == 'max_threads' and topology[key] > 2:
++                            raise ValueError('max_threads')
+                     else:
+-                        LOG.warn(_("Invalid topology config in image "
+-                                   "property: %(top)s") % {"top": top})
++                        raise ValueError(top)
+             except (TypeError, ValueError) as e:
+-                LOG.error(_("Invalid topology config in image property: "
+-                            "%(top)s") % {"top": hw_cpu_topology})
++                property = {'hw_cpu_topology': hw_cpu_topology}
++                raise exception.InvalidImageProperty(property=property)
+ 
+         return topology
+ 
+diff --git a/nova/virt/libvirt/driver.py b/nova/virt/libvirt/driver.py
+index afdd0e5..b12ef2b 100644
+--- a/nova/virt/libvirt/driver.py
++++ b/nova/virt/libvirt/driver.py
+@@ -2964,8 +2964,23 @@ class LibvirtDriver(driver.ComputeDriver):
+         # Set topology of vcpus
+         if guest.cpu is None:
+             guest.cpu = vconfig.LibvirtConfigGuestCPU()
+-        topology_conf = self.parse_topology_config(image_meta)
+-        vcpu_topology = self.caculate_vcpu_topology(guest.vcpus, topology_conf)
++
++        # TODO(wangpan): The preferred and mandatory topology should be got
++        #                from libvirt to caculate a high-performance vcpu
++        #                topology, rather than just hard code here.
++        preferred_topology = dict(max_sockets=64, max_cores=4, max_threads=1)
++        mandatory_topology = dict(max_sockets=64, max_cores=8, max_threads=2)
++        vcpu_topologies = self.get_guest_cpu_topology(inst_type, image_meta,
++                                                      preferred_topology,
++                                                      mandatory_topology)
++        if len(vcpu_topologies) == 0:
++            reason = ('may hw_cpu_topology property be inappropriate or the '
++                      'number of vcpus is odd')
++            raise exception.NoValidVcpuTopology(reason=reason)
++
++        # TODO(wangpan): Just using the first topology of returned list, better
++        #                choice method should be added.
++        vcpu_topology = vcpu_topologies[0]
+         guest.cpu.sockets = vcpu_topology['sockets']
+         guest.cpu.cores = vcpu_topology['cores']
+         guest.cpu.threads = vcpu_topology['threads']
