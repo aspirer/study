@@ -1,0 +1,236 @@
+From f021928f821228b0ac26cf4bf3a350e06d4abd32 Mon Sep 17 00:00:00 2001
+From: Wangpan <hzwangpan@corp.netease.com>
+Date: Fri, 20 Dec 2013 02:43:01 +0000
+Subject: [PATCH] Fixes auto comfirmation failed because db access
+
+The _reserve_quota_delta() method in compute/api.py reserves
+quotas in DB if deltas is not empty, and it will be called by
+confirm_resize method.
+If the confirm resize operation is launched from users through
+RESTful API, this direct DB access is allowed, and the confirm
+operation will success.
+But if the confirm operation is launched from nova-compute
+through periodic task '_poll_unconfirmed_resizes', this direct
+DB access is forbidden and the auto confirmation is failed.
+
+This change fixes the above bug by passing conductor_api to
+confirm_resize() method in compute/api.py, and adding quota
+reserve process to conductor, then the DB access will through
+conductor.
+
+Another bug in auto confirmation is also fixed in this commit,
+it is that, if the confirmation is launched through periodic task,
+then the project_id and user_id in context are all None, which
+result in reservations in DB are also have `NULL` project_id and
+user_id, when these reservations are commited, the quotas usage of
+the instance's project/user will become wrong eventually.
+
+This change fixes the above bug by checking the project_id and
+user_id in context, if they are None, use the project_id and
+user_id of instance to replace these in context, then the
+reservations will be commited to correct project/user.
+
+Closes-bug: #1262461
+
+Conflicts:
+	nova/conductor/manager.py
+	nova/conductor/rpcapi.py
+	nova/tests/compute/test_compute.py
+
+Change-Id: I5c95bb35466d4e6f0f5cb48229173cf59fd4d470
+---
+ nova/compute/api.py                    |   25 +++++++++++++++++++++----
+ nova/compute/manager.py                |    3 ++-
+ nova/conductor/api.py                  |   10 ++++++++++
+ nova/conductor/manager.py              |   13 ++++++++++++-
+ nova/conductor/rpcapi.py               |   14 ++++++++++++++
+ nova/tests/compute/test_compute.py     |    4 +++-
+ nova/tests/compute/test_compute_api.py |    2 +-
+ 7 files changed, 63 insertions(+), 8 deletions(-)
+
+diff --git a/nova/compute/api.py b/nova/compute/api.py
+index 400be29..45eef9b 100644
+--- a/nova/compute/api.py
++++ b/nova/compute/api.py
+@@ -2162,7 +2162,8 @@ class API(base.Base):
+     @check_instance_lock
+     @check_instance_cell
+     @check_instance_state(vm_state=[vm_states.RESIZED])
+-    def confirm_resize(self, context, instance, migration=None):
++    def confirm_resize(self, context, instance, migration=None,
++                       conductor_api=None):
+         """Confirms a migration/resize and deletes the 'old' instance."""
+         elevated = context.elevated()
+         if migration is None:
+@@ -2171,7 +2172,16 @@ class API(base.Base):
+ 
+         # reserve quota only for any decrease in resource usage
+         deltas = self._downsize_quota_delta(context, instance)
+-        reservations = self._reserve_quota_delta(context, deltas)
++
++        # NOTE(wangpan): fill the project_id and user_id by these values in
++        #                the instance if they are None, then the reservations
++        #                will be commited to correct project and user.
++        if context.project_id is None:
++            context.project_id = instance['project_id']
++        if context.user_id is None:
++            context.user_id = instance['user_id']
++        reservations = self._reserve_quota_delta(context, deltas,
++                                                 conductor_api=conductor_api)
+ 
+         migration.status = 'confirming'
+         migration.save()
+@@ -2281,10 +2291,17 @@ class API(base.Base):
+                                        old_instance_type, 1, -1)
+ 
+     @staticmethod
+-    def _reserve_quota_delta(context, deltas, project_id=None):
++    def _reserve_quota_delta(context, deltas, project_id=None,
++                             conductor_api=None):
+         if not deltas:
+             return
+-        return QUOTAS.reserve(context, project_id=project_id, **deltas)
++
++        if conductor_api:
++            return conductor_api.quota_reserve(context,
++                                               project_id=project_id,
++                                               **deltas)
++        else:
++            return QUOTAS.reserve(context, project_id=project_id, **deltas)
+ 
+     @staticmethod
+     def _resize_cells_support(context, reservations, instance,
+diff --git a/nova/compute/manager.py b/nova/compute/manager.py
+index 3afc76c..73c45c6 100644
+--- a/nova/compute/manager.py
++++ b/nova/compute/manager.py
+@@ -5100,7 +5100,8 @@ class ComputeManager(manager.SchedulerDependentManager):
+                 continue
+             try:
+                 self.compute_api.confirm_resize(context, instance,
+-                                                migration=migration)
++                                            migration=migration,
++                                            conductor_api=self.conductor_api)
+             except Exception as e:
+                 LOG.error(_("Error auto-confirming resize: %s. "
+                             "Will retry later.") % e, instance=instance)
+diff --git a/nova/conductor/api.py b/nova/conductor/api.py
+index eea5886..4ad571c 100644
+--- a/nova/conductor/api.py
++++ b/nova/conductor/api.py
+@@ -411,6 +411,16 @@ class API(LocalAPI):
+         return self._manager.instance_update(context, instance_uuid,
+                                              updates, 'conductor')
+ 
++    def quota_reserve(self, context, expire=None, project_id=None,
++                      user_id=None, **deltas):
++        """Perform an quota reserve in the database."""
++        if not deltas:
++            return
++
++        return self._manager.quota_reserve(context, expire=expire,
++                                           project_id=project_id,
++                                           user_id=user_id, **deltas)
++
+ 
+ class ComputeTaskAPI(object):
+     """ComputeTask API that queues up compute tasks for nova-conductor."""
+diff --git a/nova/conductor/manager.py b/nova/conductor/manager.py
+index c1c958b..2e445ef 100644
+--- a/nova/conductor/manager.py
++++ b/nova/conductor/manager.py
+@@ -74,7 +74,7 @@ class ConductorManager(manager.Manager):
+     namespace.  See the ComputeTaskManager class for details.
+     """
+ 
+-    RPC_API_VERSION = '1.58'
++    RPC_API_VERSION = '1.59'
+ 
+     def __init__(self, *args, **kwargs):
+         super(ConductorManager, self).__init__(service_name='conductor',
+@@ -497,6 +497,17 @@ class ConductorManager(manager.Manager):
+     def network_migrate_instance_finish(self, context, instance, migration):
+         self.network_api.migrate_instance_finish(context, instance, migration)
+ 
++    def quota_reserve(self, context, expire=None, project_id=None,
++                      user_id=None, deltas=None):
++        if not deltas:
++            return
++
++        return quota.QUOTAS.reserve(context,
++                                    expire=expire,
++                                    project_id=project_id,
++                                    user_id=user_id,
++                                    **deltas)
++
+     def quota_commit(self, context, reservations, project_id=None,
+                      user_id=None):
+         quota.QUOTAS.commit(context, reservations, project_id=project_id,
+diff --git a/nova/conductor/rpcapi.py b/nova/conductor/rpcapi.py
+index b4b56eb..144ea1a 100644
+--- a/nova/conductor/rpcapi.py
++++ b/nova/conductor/rpcapi.py
+@@ -110,6 +110,7 @@ class ConductorAPI(rpcclient.RpcProxy):
+                   migration_get_unconfirmed_by_dest_compute
+     1.57 - Remove migration_create()
+     1.58 - Remove migration_get()
++    1.59 - Added quota_reserve()
+     """
+ 
+     BASE_RPC_API_VERSION = '1.0'
+@@ -137,6 +138,19 @@ class ConductorAPI(rpcclient.RpcProxy):
+                           updates=updates_p,
+                           service=service)
+ 
++    def quota_reserve(self, context, expire=None, project_id=None,
++                      user_id=None, **deltas):
++        if not deltas:
++            return
++
++        deltas_p = jsonutils.to_primitive(deltas)
++        cctxt = self.client.prepare(version='1.59')
++        return cctxt.call(context, 'quota_reserve',
++                          expire=expire,
++                          project_id=project_id,
++                          user_id=user_id,
++                          deltas=deltas_p)
++
+     def instance_get(self, context, instance_id):
+         cctxt = self.client.prepare(version='1.24')
+         return cctxt.call(context, 'instance_get', instance_id=instance_id)
+diff --git a/nova/tests/compute/test_compute.py b/nova/tests/compute/test_compute.py
+index 90e787c..2c5bd6c 100644
+--- a/nova/tests/compute/test_compute.py
++++ b/nova/tests/compute/test_compute.py
+@@ -5134,12 +5134,14 @@ class ComputeTestCase(BaseTestCase):
+                     migration.update(updates)
+                     return migration
+ 
+-        def fake_confirm_resize(context, instance, migration=None):
++        def fake_confirm_resize(context, instance, migration=None,
++                                conductor_api=None):
+             # raise exception for 'fake_uuid4' to check migration status
+             # does not get set to 'error' on confirm_resize failure.
+             if instance['uuid'] == 'fake_uuid4':
+                 raise test.TestingException('bomb')
+             self.assertNotEqual(migration, None)
++            self.assertNotEqual(conductor_api, None)
+             for migration2 in migrations:
+                 if (migration2['instance_uuid'] ==
+                         migration['instance_uuid']):
+diff --git a/nova/tests/compute/test_compute_api.py b/nova/tests/compute/test_compute_api.py
+index fc4ab1e..83bdc4c 100644
+--- a/nova/tests/compute/test_compute_api.py
++++ b/nova/tests/compute/test_compute_api.py
+@@ -682,7 +682,7 @@ class _ComputeAPIUnitTestMixIn(object):
+         resvs = ['resvs']
+ 
+         self.compute_api._reserve_quota_delta(self.context,
+-                                              'deltas').AndReturn(resvs)
++                                'deltas', conductor_api=None).AndReturn(resvs)
+ 
+         def _check_mig(expected_task_state=None):
+             self.assertEqual('confirming', fake_mig.status)
+-- 
+1.7.9.5
+
