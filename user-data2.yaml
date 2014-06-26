@@ -1,0 +1,5 @@
+#cloud-config
+chpasswd:
+  list: |
+      root:root
+  expire: False
