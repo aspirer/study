@@ -41,7 +41,7 @@ rados_ioctx_t init_ioctx(rados_t rados, const char* pool) {
     rados_ioctx_t io_ctx = NULL;
 
     // 2. read ceph config file
-    ret = rados_conf_read_file(rados, "/etc/ceph/ceph.conf");
+    ret = rados_conf_read_file(rados, "./ceph.conf");
     if (ret < 0) {
         // This could fail if the config file is malformed, but it'd be hard.
         printf("failed to parse config file! err %d\n", ret);
@@ -86,7 +86,7 @@ rbd_image_t init_image(rados_ioctx_t io_ctx, const char * vol) {
     return image;
 }
 
-int get_rbd_size(rbd_image_t image) {
+uint64_t get_rbd_size(rbd_image_t image) {
     int ret = 0;
     uint64_t size = 0;
 
@@ -113,7 +113,7 @@ void rbd_finish_aiocb(rbd_completion_t c, void *arg)
     //printf("aio callback count: %d\n", rx);
 }
 
-int aio_write(rbd_image_t image, const char *buff, int len, int offset) {
+int aio_write(rbd_image_t image, const char *buff, int len, uint64_t offset) {
     rbd_completion_t c;
     int ret = rbd_aio_create_completion((void *)buff, (rbd_callback_t) rbd_finish_aiocb, &c);
     if (ret < 0) {
@@ -164,7 +164,8 @@ int main(int argc, char *argv[]) {
         return -2;
     }
 
-    int ret, offset, len, delay;
+    int ret, delay, len;
+    uint64_t offset;
     char buff[4096] = {0};
     char pool[32] = {0};
     char vol[32] = {0};
@@ -192,8 +193,8 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    int size = get_rbd_size(image);
-    //printf("image size: %d\n", size);
+    uint64_t size = get_rbd_size(image);
+    //printf("image size: %lld\n", size);
 
     memset(buff, 1, 1024);  // 0~1023
     memset(buff + 1023, 0, 1024);  // 1024~2047
@@ -204,10 +205,10 @@ int main(int argc, char *argv[]) {
     time_t start = time(NULL);
     delay = atoi(argv[3]);
     while(!stop) {
-        offset = rand() % (size - len);
+        offset = (rand() * 1000ULL) % (size - len);
         aio_write(image, buff, len, offset);
         ++tx;
-        //printf("write data len: %d, offset: %d, count: %d\n", len, offset, tx);
+        //printf("write data len: %d, offset: %lld, count: %d\n", len, offset, tx);
         usleep(delay);
     }
     //aio_read(image, buff);
@@ -225,11 +226,10 @@ int main(int argc, char *argv[]) {
         printf("couldn't close rbd image! err %d\n", ret);
         return EXIT_FAILURE;
     } else {
-        printf("closed rbd image: vol2\n");
+        printf("closed rbd image: %s\n", vol);
     }
     rados_ioctx_destroy(io_ctx);
     rados_shutdown(rados);
 
     return 0;
-
 }
